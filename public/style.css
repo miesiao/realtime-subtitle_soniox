@@ -1,0 +1,94 @@
+* { box-sizing: border-box; }
+body {
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  margin: 0;
+  padding: 16px 24px 32px;
+  background: #0f1115;
+  color: #e6e6e6;
+}
+header h1 { font-size: 18px; margin: 0 0 4px; }
+.model-info { font-size: 12px; color: #888; margin-bottom: 16px; }
+
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+.controls label { display: flex; flex-direction: column; font-size: 12px; gap: 4px; color: #aaa; }
+select, textarea, button {
+  font-family: inherit;
+  font-size: 14px;
+  background: #1b1e26;
+  color: #e6e6e6;
+  border: 1px solid #333a45;
+  border-radius: 6px;
+  padding: 6px 10px;
+}
+button { cursor: pointer; }
+button:disabled { opacity: 0.4; cursor: not-allowed; }
+#startBtn { background: #1f6f4a; }
+#stopBtn { background: #7a2a2a; }
+.status { font-size: 13px; color: #9ab; }
+
+.terms { display: flex; flex-direction: column; gap: 4px; margin-bottom: 16px; }
+.terms label { font-size: 12px; color: #aaa; }
+.terms textarea { width: 100%; resize: vertical; }
+
+.columns { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.pane {
+  background: #161923;
+  border: 1px solid #262b36;
+  border-radius: 8px;
+  min-height: 420px;
+  display: flex;
+  flex-direction: column;
+}
+.pane-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+  border-bottom: 1px solid #262b36;
+  font-size: 13px;
+  font-weight: 600;
+  color: #ccc;
+}
+.script-badge {
+  font-size: 11px;
+  font-weight: 500;
+  color: #ffb020;
+  background: #3a2c10;
+  padding: 2px 8px;
+  border-radius: 10px;
+  min-height: 18px;
+}
+.pane-body {
+  padding: 12px;
+  font-size: 18px;
+  line-height: 1.8;
+  overflow-y: auto;
+  flex: 1;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.tok { transition: opacity 0.15s; }
+.tok.non-final { opacity: 0.55; }
+.endpoint-marker { color: #ffb020; font-size: 13px; margin: 0 2px; }
+
+.lang-zh { color: #ff6b6b; }
+.lang-en { color: #4dabf7; }
+.lang-es { color: #51cf66; }
+.lang-other { color: #adb5bd; }
+
+.legend { margin-top: 16px; font-size: 12px; color: #888; display: flex; gap: 10px; align-items: center; }
+.legend-title { color: #aaa; }
+.lang-chip {
+  padding: 1px 8px;
+  border-radius: 8px;
+  background: #1b1e26;
+  border: 1px solid #333a45;
+}
+.endpoint-legend { color: #666; }

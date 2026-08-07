@@ -1,0 +1,15 @@
+{
+  "name": "realtime-subtitle-soniox-test",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@soniox/client": "^2.2.0",
+    "@soniox/node": "^2.2.0",
+    "dotenv": "^16.4.5",
+    "opencc-js": "^1.4.1"
+  }
+}

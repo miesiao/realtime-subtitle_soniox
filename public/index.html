@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8" />
+<title>Soniox Real-Time STT + Translation — Test</title>
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header>
+    <h1>Soniox 即時聽寫＋翻譯（單一測試頁）</h1>
+    <div class="model-info">model: stt-rt-v5 · language_hints: zh, en, es · one_way translation</div>
+    <div class="model-info">中文顯示一律強制轉換為繁體（Taiwan 用詞），與 Soniox 原始輸出腳本無關</div>
+  </header>
+
+  <section class="controls">
+    <label>
+      目標語言 (target_language)
+      <select id="targetLang">
+        <option value="zh">中文 (zh)</option>
+        <option value="en">English (en)</option>
+      </select>
+    </label>
+
+    <div class="buttons">
+      <button id="startBtn">Start</button>
+      <button id="stopBtn" disabled>Stop</button>
+    </div>
+
+    <span id="status" class="status">idle</span>
+  </section>
+
+  <section class="terms">
+    <label for="terms">context.terms（詞彙/領域提示，換行或逗號分隔，Start 前設定）</label>
+    <textarea id="terms" rows="2" placeholder="例：Soniox, WebSocket, 即時字幕"></textarea>
+  </section>
+
+  <main class="columns">
+    <div class="pane">
+      <div class="pane-header">
+        <span>原文 (original)</span>
+        <span id="originalScript" class="script-badge"></span>
+      </div>
+      <div id="originalText" class="pane-body"></div>
+    </div>
+    <div class="pane">
+      <div class="pane-header">
+        <span>譯文 (translation)</span>
+        <span id="translationScript" class="script-badge"></span>
+      </div>
+      <div id="translationText" class="pane-body"></div>
+    </div>
+  </main>
+
+  <footer class="legend">
+    <span class="legend-title">語言顏色：</span>
+    <span class="lang-chip lang-zh">zh</span>
+    <span class="lang-chip lang-en">en</span>
+    <span class="lang-chip lang-es">es</span>
+    <span class="lang-chip lang-other">other</span>
+    <span class="endpoint-legend">| <span class="endpoint-marker">⏸</span> = endpoint detected</span>
+  </footer>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
