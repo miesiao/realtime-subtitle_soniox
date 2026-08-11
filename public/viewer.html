@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<title>即時字幕</title>
+<link rel="stylesheet" href="/viewer.css" />
+</head>
+<body>
+  <div id="connBanner"></div>
+
+  <div id="app">
+    <div id="topBar">
+      <span id="connStatus">connecting…</span>
+      <label id="toggleOriginal">
+        <input type="checkbox" id="showOriginal" checked />
+        顯示原文
+      </label>
+    </div>
+
+    <div id="feedPane">
+      <div id="feedInner">
+        <div id="loadMoreIndicator"></div>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="/viewer.js"></script>
+</body>
+</html>

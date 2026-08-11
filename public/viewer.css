@@ -1,0 +1,126 @@
+* { box-sizing: border-box; }
+html, body {
+  height: 100%;
+  margin: 0;
+  background: #0d1117;
+  color: #c9d1d9;
+  font-family: -apple-system, "Segoe UI", "PingFang TC", "Noto Sans TC", "Microsoft JhengHei", sans-serif;
+  overflow: hidden;
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+/* ── Top bar ── */
+#topBar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 16px;
+  font-size: 12px;
+  color: #6e7681;
+  background: #0d1117;
+  border-bottom: 1px solid #161b22;
+  z-index: 5;
+}
+#connStatus.connected { color: #3fb950; }
+#connStatus.reconnecting { color: #e3b341; }
+#toggleOriginal {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  color: #8b949e;
+  user-select: none;
+}
+
+/* ── Connection banner (kept low-key on purpose — not an alarm) ── */
+#connBanner {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  height: 22px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 600;
+  z-index: 30;
+  transition: opacity 0.5s ease;
+}
+#connBanner.disconnected { display: flex; background: #3a2f13; color: #e3b341; opacity: 1; }
+#connBanner.reconnected  { display: flex; background: #14261a; color: #3fb950; opacity: 1; }
+#connBanner.fade { opacity: 0; }
+
+/* ── Feed: one continuous scrolling stream, anchored to bottom, mask-faded
+   at top. Newest item is at the bottom, large & bright; everything above
+   it (once settled) is small & dim. ── */
+#feedPane {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 18px 22px;
+  mask-image: linear-gradient(to bottom, transparent 0%, black 10%);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, black 10%);
+}
+#feedInner {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 20px;
+}
+#loadMoreIndicator {
+  text-align: center;
+  font-size: 11px;
+  color: #4a5568;
+  padding: 4px 0 10px;
+  min-height: 1em;
+}
+
+.feed-item { display: flex; flex-direction: column; }
+.item-original > div,
+.item-translation > div {
+  margin-bottom: 2px;
+}
+.item-original > div:last-child,
+.item-translation > div:last-child {
+  margin-bottom: 0;
+}
+
+/* Settled: small, dim — same tier as old history blocks */
+.feed-item.settled { opacity: 0.75; }
+.feed-item.settled .item-original {
+  font-size: clamp(12px, 2.1vw, 14px);
+  color: #586069;
+  margin-bottom: 2px;
+}
+.feed-item.settled .item-translation {
+  font-size: clamp(14px, 2.6vw, 18px);
+  color: #8b949e;
+  line-height: 1.5;
+}
+
+/* Live: the sentence currently being spoken — large, bold, bright */
+.feed-item.live .item-original {
+  font-size: clamp(13px, 2.2vw, 16px);
+  color: #7d8590;
+  margin-bottom: 8px;
+}
+.feed-item.live .item-translation {
+  font-size: clamp(20px, 4.4vw, 32px);
+  font-weight: 700;
+  color: #f0f6fc;
+  line-height: 1.35;
+}
+
+.feed-placeholder {
+  font-size: clamp(18px, 3.5vw, 26px);
+  color: #30363d;
+}
+
+#app.hide-original .item-original { display: none; }

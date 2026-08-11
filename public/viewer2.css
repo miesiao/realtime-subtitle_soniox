@@ -1,0 +1,118 @@
+* { box-sizing: border-box; }
+html, body {
+  height: 100%;
+  margin: 0;
+  background: #0d1117;
+  color: #c9d1d9;
+  font-family: -apple-system, "Segoe UI", "PingFang TC", "Noto Sans TC", "Microsoft JhengHei", sans-serif;
+  overflow: hidden;
+}
+
+:root {
+  --zoom-scale: 1; /* user-adjustable via the A−/A+ buttons, see viewer2.js — applies to both panes */
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+/* ── Top bar ── */
+#topBar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 16px;
+  font-size: 12px;
+  color: #6e7681;
+  background: #0d1117;
+  border-bottom: 1px solid #161b22;
+  z-index: 5;
+}
+#connStatus.connected { color: #3fb950; }
+#connStatus.reconnecting { color: #e3b341; }
+#toggleOriginal {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  color: #8b949e;
+  user-select: none;
+}
+
+#zoomControl {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #8b949e;
+}
+#zoomControl button {
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  background: #1b1e26;
+  color: #c9d1d9;
+  border: 1px solid #333a45;
+  border-radius: 6px;
+  padding: 3px 9px;
+  cursor: pointer;
+}
+#zoomControl button:hover { background: #262b36; }
+#zoomLevel { min-width: 3.2em; text-align: center; }
+
+/* ── Connection banner (kept low-key on purpose — not an alarm) ── */
+#connBanner {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  height: 22px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 600;
+  z-index: 30;
+  transition: opacity 0.5s ease;
+}
+#connBanner.disconnected { display: flex; background: #3a2f13; color: #e3b341; opacity: 1; }
+#connBanner.reconnected  { display: flex; background: #14261a; color: #3fb950; opacity: 1; }
+#connBanner.fade { opacity: 0; }
+
+/* ── Original (top half) / translation (bottom half) — plain continuous
+   growing transcript each, same rhythm as host's own monitor panes: text
+   just keeps accumulating. Each finalized sentence (split on 。！？.?!,
+   see viewer2.js) is its own line, no AI/model involved. ── */
+.textPane {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 16px 22px;
+}
+#originalPane { border-bottom: 1px solid #1c222c; }
+
+#originalContent {
+  font-size: calc(clamp(16px, 3vw, 26px) * var(--zoom-scale));
+  color: #8b949e;
+  line-height: 1.6;
+  word-break: break-word;
+}
+#originalContent > div { margin-bottom: 4px; }
+
+#translationContent {
+  font-size: calc(clamp(16px, 2.8vw, 26px) * var(--zoom-scale));
+  font-weight: 700;
+  color: #f0f6fc;
+  line-height: 1.5;
+  word-break: break-word;
+}
+#translationContent > div { margin-bottom: 6px; }
+
+/* The currently-open pair's live snapshot, dimmer than settled text —
+   mirrors host.js's own .tok.non-final treatment. */
+.live-tail { opacity: 0.55; }
+
+/* Unchecked "顯示原文": original pane disappears entirely and the
+   translation pane's flex:1 fills the freed space automatically. */
+#app.hide-original #originalPane { display: none; }

@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8" />
+<title>Host — 即時字幕控台</title>
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div id="hostDisconnectBanner">⚠ 與伺服器斷線！所有觀眾目前收不到新字幕 — 正在自動重新連接…</div>
+
+  <header>
+    <h1>Host（一段式：聽寫＋翻譯）</h1>
+    <div class="model-info">model: stt-rt-v5 · language_hints: zh, en, es · one_way translation</div>
+    <div class="model-info">這頁不再是給觀眾看的畫面——觀眾請開 <code>/viewer</code>。這裡只是 host 自己校對用的監看畫面。</div>
+  </header>
+
+  <section class="controls">
+    <label>
+      目標語言 (target_language)
+      <select id="targetLang">
+        <option value="zh">中文 (zh)</option>
+        <option value="en">English (en)</option>
+      </select>
+    </label>
+
+    <div class="buttons">
+      <button id="startBtn">Start</button>
+      <button id="stopBtn" disabled>暫停 Pause</button>
+      <button id="clearBtn">清空 Clear</button>
+    </div>
+
+    <span id="status" class="status">idle</span>
+    <span id="wsStatus" class="status">ws: connecting…</span>
+    <span id="viewerCount" class="status">viewers: 0</span>
+  </section>
+
+  <section class="terms">
+    <label for="terms">context.terms（詞彙/領域提示，換行或逗號分隔，Start 前設定）</label>
+    <textarea id="terms" rows="2" placeholder="例：Soniox, WebSocket, 即時字幕"></textarea>
+  </section>
+
+  <main class="columns">
+    <div class="pane">
+      <div class="pane-header">
+        <span>原文 (original)</span>
+        <span id="originalScript" class="script-badge"></span>
+      </div>
+      <div id="originalText" class="pane-body"></div>
+    </div>
+    <div class="pane">
+      <div class="pane-header">
+        <span>譯文 (translation)</span>
+        <span id="translationScript" class="script-badge"></span>
+      </div>
+      <div id="translationText" class="pane-body"></div>
+    </div>
+  </main>
+
+  <section class="pane" style="margin-top:16px;">
+    <div class="pane-header"><span>已送出給觀眾的 utterance（每段 endpoint 定稿時送一次）</span></div>
+    <div id="sentLog" class="pane-body" style="min-height:120px; font-size:14px;"></div>
+  </section>
+
+  <footer class="legend">
+    <span class="legend-title">語言顏色：</span>
+    <span class="lang-chip lang-zh">zh</span>
+    <span class="lang-chip lang-en">en</span>
+    <span class="lang-chip lang-es">es</span>
+    <span class="lang-chip lang-other">other</span>
+    <span class="endpoint-legend">| <span class="endpoint-marker">⏸</span> = endpoint detected → 該段送出</span>
+  </footer>
+
+  <script type="module" src="/host.js"></script>
+</body>
+</html>
