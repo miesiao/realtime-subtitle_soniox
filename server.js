@@ -2,6 +2,7 @@ import 'dotenv/config';
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
 import { SonioxNodeClient } from '@soniox/node';
@@ -28,6 +29,18 @@ const MIME_TYPES = {
   '.css': 'text/css; charset=utf-8',
 };
 
+// Guards the one endpoint that actually costs money (Soniox temporary key
+// issuance). Everything else — viewer pages, the WebSocket relay — stays
+// open. Fixed-time comparison so a wrong guess can't be narrowed down by
+// measuring how long the check took.
+function isValidHostSecret(provided) {
+  const expected = process.env.HOST_SECRET;
+  const expectedBuf = Buffer.from(expected);
+  const providedBuf = Buffer.from(typeof provided === 'string' ? provided : '');
+  if (expectedBuf.length !== providedBuf.length) return false;
+  return crypto.timingSafeEqual(expectedBuf, providedBuf);
+}
+
 function serveFile(res, filePath) {
   fs.readFile(filePath, (err, data) => {
     if (err) {
@@ -44,6 +57,17 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
 
   if (req.method === 'POST' && url.pathname === '/api/temporary-key') {
+    if (!process.env.HOST_SECRET) {
+      console.error('HOST_SECRET is not set — refusing to issue Soniox temporary keys. Set HOST_SECRET in .env before going live.');
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Server misconfigured: HOST_SECRET not set' }));
+      return;
+    }
+    if (!isValidHostSecret(req.headers['x-host-secret'])) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Unauthorized' }));
+      return;
+    }
     try {
       // usage_type must be "transcribe_websocket" for real-time STT (per @soniox/node types).
       const { api_key, expires_at } = await soniox.auth.createTemporaryKey({

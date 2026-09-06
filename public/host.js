@@ -148,12 +148,52 @@ function sendUtterance(original, translation) {
   logSent(trimmedOriginal, translations);
 }
 
+// --- Host password gate (protects the one endpoint that costs money) ------
+// Not a real account system — just a shared password kept in localStorage
+// so the host isn't prompted every single recording session.
+const HOST_SECRET_STORAGE_KEY = 'hostSecret';
+
+function getStoredHostSecret() {
+  return localStorage.getItem(HOST_SECRET_STORAGE_KEY);
+}
+
+function promptForHostSecret() {
+  const secret = window.prompt('請輸入 Host 密碼：') || '';
+  localStorage.setItem(HOST_SECRET_STORAGE_KEY, secret);
+  return secret;
+}
+
+function clearStoredHostSecret() {
+  localStorage.removeItem(HOST_SECRET_STORAGE_KEY);
+}
+
+function requestTemporaryKey(hostSecret) {
+  return fetch('/api/temporary-key', {
+    method: 'POST',
+    headers: { 'x-host-secret': hostSecret },
+  });
+}
+
+async function fetchTemporaryKey() {
+  let hostSecret = getStoredHostSecret();
+  if (!hostSecret) hostSecret = promptForHostSecret();
+
+  let res = await requestTemporaryKey(hostSecret);
+  if (res.status === 401) {
+    clearStoredHostSecret();
+    alert('密碼錯誤，請重新輸入');
+    hostSecret = promptForHostSecret();
+    res = await requestTemporaryKey(hostSecret);
+  }
+  if (!res.ok) throw new Error('Failed to fetch temporary key from server');
+  const { api_key } = await res.json();
+  return api_key;
+}
+
 // --- Soniox client (temporary key fetched fresh per recording session) --
 const client = new SonioxClient({
   config: async () => {
-    const res = await fetch('/api/temporary-key', { method: 'POST' });
-    if (!res.ok) throw new Error('Failed to fetch temporary key from server');
-    const { api_key } = await res.json();
+    const api_key = await fetchTemporaryKey();
     return { api_key };
   },
 });
