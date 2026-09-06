@@ -73,6 +73,7 @@ function detectHanziScript(text) {
 const startBtn = document.getElementById('startBtn');
 const stopBtn = document.getElementById('stopBtn');
 const clearBtn = document.getElementById('clearBtn');
+const endSessionBtn = document.getElementById('endSessionBtn');
 const targetLangSelect = document.getElementById('targetLang');
 const termsInput = document.getElementById('terms');
 const statusEl = document.getElementById('status');
@@ -83,11 +84,53 @@ const translationTextEl = document.getElementById('translationText');
 const originalScriptEl = document.getElementById('originalScript');
 const translationScriptEl = document.getElementById('translationScript');
 const sentLogEl = document.getElementById('sentLog');
+const joinCodeEl = document.getElementById('joinCode');
+const viewerLinkEl = document.getElementById('viewerLink');
+const qrImgEl = document.getElementById('qrImg');
 
 const LANG_CLASS = { zh: 'lang-zh', en: 'lang-en', es: 'lang-es' };
 function langClass(lang) {
   return LANG_CLASS[lang] || 'lang-other';
 }
+
+// --- Session creation (SPEC §2/§4: internal id + public join_code + QR) ----
+// One session per page load — "開一場即生成新亂碼網址", Meet-mode. The
+// internal id only ever travels over this authenticated fetch response and
+// this page's own WS registration; it never gets embedded in the QR/viewer
+// link (that's `joinCode`, the capability-based ticket — see §3).
+let currentSession = null; // { id, joinCode, viewerUrl, qrDataUrl }
+
+function requestCreateSession(secret) {
+  return fetch('/api/sessions', {
+    method: 'POST',
+    headers: { 'x-host-secret': secret },
+  });
+}
+
+async function createSession() {
+  let res = await requestCreateSession(hostSecret);
+  if (res.status === 401) {
+    clearStoredHostSecret();
+    alert('密碼錯誤，請重新輸入');
+    hostSecret = promptForHostSecret();
+    res = await requestCreateSession(hostSecret);
+  }
+  if (!res.ok) throw new Error('Failed to create session');
+  return res.json();
+}
+
+function renderSession(session) {
+  joinCodeEl.textContent = session.joinCode;
+  viewerLinkEl.href = session.viewerUrl;
+  viewerLinkEl.textContent = session.viewerUrl;
+  if (session.qrDataUrl) {
+    qrImgEl.src = session.qrDataUrl;
+    qrImgEl.hidden = false;
+  }
+}
+
+currentSession = await createSession();
+renderSession(currentSession);
 
 // --- Server WS connection (host role) --------------------------------------
 // Independent of Soniox recording state — connects on page load so host can
@@ -128,7 +171,7 @@ function connectWs() {
     wsReconnectAttempt = 0;
     wsStatusEl.textContent = 'ws: connected';
     hideHostDisconnectBanner();
-    ws.send(JSON.stringify({ type: 'register', role: 'host' }));
+    ws.send(JSON.stringify({ type: 'register', role: 'host', sessionId: currentSession.id }));
   });
   ws.addEventListener('close', () => {
     wsStatusEl.textContent = 'ws: disconnected';
@@ -142,6 +185,8 @@ function connectWs() {
     const msg = JSON.parse(event.data);
     if (msg.type === 'viewer_count') {
       viewerCountEl.textContent = `viewers: ${msg.count}`;
+    } else if (msg.type === 'register_error') {
+      wsStatusEl.textContent = `ws: register failed (${msg.reason})`;
     }
   });
 }
@@ -523,6 +568,11 @@ function startRecording() {
 startBtn.addEventListener('click', () => {
   sonioxRetryCount = 0; // manual Start always gets a fresh retry budget
   userWantsRecording = true;
+  // First Start flips the session created → live (SPEC §4); a later
+  // pause/Start cycle re-sends this but the server treats it as a no-op.
+  if (ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'host_start' }));
+  }
   startRecording();
 });
 
@@ -549,4 +599,31 @@ clearBtn.addEventListener('click', () => {
   if (ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: 'host_clear' }));
   }
+});
+
+// Ends the session for good (live/created → ended, SPEC §4) — distinct from
+// stopBtn's pause. The join_code stops admitting viewers the moment this
+// lands; starting a new session means reloading this page (§0: "用完即拋").
+endSessionBtn.addEventListener('click', async () => {
+  if (!confirm('確定要結束本場嗎？結束後這個場次代碼就不能再進場了。')) return;
+  if (recording && userWantsRecording) {
+    userWantsRecording = false;
+    clearTimeout(sonioxRetryTimer);
+    statusEl.textContent = 'stopping…';
+    try {
+      await recording.stop();
+    } catch (err) {
+      console.error('Stop failed:', err);
+    }
+    flushPair();
+    setUiRecording(false);
+  }
+  if (ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'host_end_session' }));
+  }
+  startBtn.disabled = true;
+  stopBtn.disabled = true;
+  clearBtn.disabled = true;
+  endSessionBtn.disabled = true;
+  statusEl.textContent = 'session ended';
 });

@@ -14,6 +14,14 @@
     <div class="model-info">這頁不再是給觀眾看的畫面——觀眾請開 <code>/viewer</code>。這裡只是 host 自己校對用的監看畫面。</div>
   </header>
 
+  <section class="session-info">
+    <div class="session-info-row">
+      <span>場次代碼 join code：<code id="joinCode">…</code></span>
+      <a id="viewerLink" href="#" target="_blank" rel="noopener">開啟觀眾頁 ↗</a>
+    </div>
+    <img id="qrImg" alt="掃碼加入觀眾頁" hidden />
+  </section>
+
   <section class="controls">
     <label>
       目標語言 (target_language)
@@ -27,6 +35,7 @@
       <button id="startBtn">Start</button>
       <button id="stopBtn" disabled>暫停 Pause</button>
       <button id="clearBtn">清空 Clear</button>
+      <button id="endSessionBtn">結束本場 End Session</button>
     </div>
 
     <span id="status" class="status">idle</span>

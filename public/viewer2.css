@@ -79,6 +79,24 @@ html, body {
 #connBanner.reconnected  { display: flex; background: #14261a; color: #3fb950; opacity: 1; }
 #connBanner.fade { opacity: 0; }
 
+/* ── Session overlay: covers the feed while there's nothing a viewer is
+   allowed to see yet — no code, invalid code, not started, or ended. ── */
+#sessionOverlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  text-align: center;
+  font-size: clamp(16px, 3vw, 22px);
+  line-height: 1.6;
+  color: #c9d1d9;
+  background: #0d1117;
+}
+#sessionOverlay[hidden] { display: none; }
+
 /* ── Original (top half) / translation (bottom half) — plain continuous
    growing transcript each, same rhythm as host's own monitor panes: text
    just keeps accumulating. Each finalized sentence (split on 。！？.?!,

@@ -29,6 +29,37 @@ header h1 { font-size: 18px; margin: 0 0 4px; }
   50% { opacity: 0.55; }
 }
 
+.session-info {
+  background: #161923;
+  border: 1px solid #262b36;
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.session-info-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  font-size: 13px;
+  color: #ccc;
+}
+.session-info-row code {
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  color: #f0f6fc;
+  background: #0d1117;
+  padding: 2px 8px;
+  border-radius: 6px;
+}
+.session-info-row a { color: #4dabf7; }
+#qrImg { width: 140px; height: 140px; border-radius: 6px; background: #fff; padding: 6px; }
+#endSessionBtn { background: #7a2a2a; }
+
 .controls {
   display: flex;
   align-items: center;

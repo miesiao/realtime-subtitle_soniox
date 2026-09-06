@@ -8,6 +8,7 @@
 const appEl = document.getElementById('app');
 const connStatusEl = document.getElementById('connStatus');
 const connBannerEl = document.getElementById('connBanner');
+const sessionOverlayEl = document.getElementById('sessionOverlay');
 const showOriginalEl = document.getElementById('showOriginal');
 const originalPaneEl = document.getElementById('originalPane');
 const originalContentEl = document.getElementById('originalContent');
@@ -16,6 +17,19 @@ const translationContentEl = document.getElementById('translationContent');
 const zoomOutBtn = document.getElementById('zoomOutBtn');
 const zoomInBtn = document.getElementById('zoomInBtn');
 const zoomLevelEl = document.getElementById('zoomLevel');
+
+// --- Session join_code (SPEC §3): the capability-based ticket from the QR
+// link/URL — "?code=xxx-xxxx-xxx". No code, no session; the overlay covers
+// the feed the whole time and the WS layer never even connects.
+const joinCode = new URLSearchParams(location.search).get('code');
+
+function showSessionOverlay(text) {
+  sessionOverlayEl.textContent = text;
+  sessionOverlayEl.hidden = false;
+}
+function hideSessionOverlay() {
+  sessionOverlayEl.hidden = true;
+}
 
 // --- "顯示原文" toggle: unchecked hides the original pane entirely, and
 // the translation pane's flex:1 fills the freed space automatically. ------
@@ -245,7 +259,7 @@ function connect() {
 
   ws.onopen = () => {
     reconnectAttempt = 0;
-    ws.send(JSON.stringify({ type: 'register', role: 'viewer' }));
+    ws.send(JSON.stringify({ type: 'register', role: 'viewer', joinCode }));
     // A reconnect (as opposed to first-ever load): ask precisely for
     // whatever landed while we were gone instead of trusting the
     // automatic `backfill`, whose fixed-size window may not reach far
@@ -295,9 +309,30 @@ function connect() {
       resetTranscript();
       return;
     }
+    if (msg.type === 'register_error') {
+      showSessionOverlay(msg.reason === 'invalid_code'
+        ? '找不到此場次，請確認網址或 QR code 是否正確。'
+        : '無法加入場次。');
+      return;
+    }
+    if (msg.type === 'session_status') {
+      if (msg.status === 'live') {
+        hideSessionOverlay();
+      } else if (msg.status === 'created') {
+        showSessionOverlay('尚未開始，請稍候…');
+      } else if (msg.status === 'ended') {
+        showSessionOverlay('本場已結束。');
+      }
+      return;
+    }
   };
 }
-connect();
+
+if (joinCode) {
+  connect();
+} else {
+  showSessionOverlay('缺少場次代碼，請重新掃描 QR code 或確認網址。');
+}
 
 // Manual reconnect: close the old socket without letting its own onclose
 // schedule a second retry, then connect immediately. Used when we don't
@@ -329,6 +364,6 @@ document.addEventListener('visibilitychange', () => {
     return;
   }
   requestWakeLock();
-  if (hiddenAt !== null && Date.now() - hiddenAt > 5000) forceReconnect();
+  if (joinCode && hiddenAt !== null && Date.now() - hiddenAt > 5000) forceReconnect();
   hiddenAt = null;
 });

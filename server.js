@@ -6,6 +6,7 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
 import { SonioxNodeClient } from '@soniox/node';
+import QRCode from 'qrcode';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 8787;
@@ -53,6 +54,95 @@ function serveFile(res, filePath) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Session store — the multi-session isolation this refactor exists for.
+//
+// Every runtime piece of state that used to be a lone module-level variable
+// (hostWs / viewers / history / nextId) now lives on one of these objects,
+// keyed by an internal `id`. Two sessions running at once get two objects;
+// nothing is shared, so there is nothing left to cross-broadcast into.
+//
+// Two different identifiers, never interchangeable (see SPEC §3):
+//   - `id`: internal, permanent-for-the-life-of-the-process, never appears
+//     in a public URL. The host page gets it once, straight from an
+//     authenticated POST /api/sessions response, and uses it only over its
+//     own WebSocket registration — never rendered into the QR/viewer link.
+//   - `joinCode`: the public, capability-based ticket. Anyone holding it can
+//     watch; it's what goes in the QR code and the viewer URL.
+// ---------------------------------------------------------------------------
+const sessions = new Map();           // id -> session
+const sessionsByJoinCode = new Map(); // joinCode -> id
+
+const JOIN_CODE_ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789'; // no 0/o/1/i/l — avoids read-aloud ambiguity
+const JOIN_CODE_SEGMENTS = [3, 4, 3];
+
+function randomSegment(len) {
+  const bytes = crypto.randomBytes(len);
+  let s = '';
+  for (let i = 0; i < len; i++) s += JOIN_CODE_ALPHABET[bytes[i] % JOIN_CODE_ALPHABET.length];
+  return s;
+}
+
+function generateJoinCode() {
+  return JOIN_CODE_SEGMENTS.map(randomSegment).join('-');
+}
+
+function createUniqueJoinCode() {
+  let code;
+  do { code = generateJoinCode(); } while (sessionsByJoinCode.has(code));
+  return code;
+}
+
+// created: QR issued, host not broadcasting yet, viewers can't watch.
+// live: host is broadcasting, calibrating, viewers can watch.
+// ended: host closed the session for good; join_code no longer admits anyone.
+function createSession() {
+  const id = crypto.randomUUID();
+  const joinCode = createUniqueJoinCode();
+  const session = {
+    id,
+    joinCode,
+    status: 'created',
+    hostWs: null,
+    viewers: new Set(),
+    history: [],   // oldest → newest, capped at HISTORY_MAX
+    nextId: 1,
+    createdAt: Date.now(),
+    startedAt: null,
+    endedAt: null,
+  };
+  sessions.set(id, session);
+  sessionsByJoinCode.set(joinCode, id);
+  return session;
+}
+
+// Ended sessions are kept around (not deleted) so a viewer who still has the
+// old join_code gets an accurate "本場已結束" instead of "invalid_code" —
+// but this is in-memory only, so both ended and long-abandoned never-started
+// sessions need a TTL or the Map grows forever across a long-running process.
+const SESSION_CLEANUP_INTERVAL_MS = 30 * 60 * 1000;
+const ENDED_SESSION_TTL_MS = 2 * 60 * 60 * 1000;
+const ABANDONED_CREATED_SESSION_TTL_MS = 6 * 60 * 60 * 1000;
+
+function sweepStaleSessions() {
+  const now = Date.now();
+  for (const [id, session] of sessions) {
+    const stale =
+      (session.status === 'ended' && now - session.endedAt > ENDED_SESSION_TTL_MS) ||
+      (session.status === 'created' && now - session.createdAt > ABANDONED_CREATED_SESSION_TTL_MS);
+    if (stale) {
+      sessions.delete(id);
+      sessionsByJoinCode.delete(session.joinCode);
+    }
+  }
+}
+setInterval(sweepStaleSessions, SESSION_CLEANUP_INTERVAL_MS).unref();
+
+function getOrigin(req) {
+  const proto = req.headers['x-forwarded-proto'] || (req.socket.encrypted ? 'https' : 'http');
+  return `${proto}://${req.headers.host}`;
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
 
@@ -81,6 +171,35 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Failed to create temporary key' }));
     }
+    return;
+  }
+
+  // Creates a new session (SPEC §2/§4): generates the internal id + public
+  // join_code, in status `created`. Gated the same way as the temporary-key
+  // endpoint — no accounts yet (that's phase 3), so this shared secret is
+  // the only thing stopping a stranger from spinning up sessions for free.
+  if (req.method === 'POST' && url.pathname === '/api/sessions') {
+    if (!process.env.HOST_SECRET) {
+      console.error('HOST_SECRET is not set — refusing to create sessions. Set HOST_SECRET in .env before going live.');
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Server misconfigured: HOST_SECRET not set' }));
+      return;
+    }
+    if (!isValidHostSecret(req.headers['x-host-secret'])) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Unauthorized' }));
+      return;
+    }
+    const session = createSession();
+    const viewerUrl = `${getOrigin(req)}/viewer2?code=${session.joinCode}`;
+    let qrDataUrl = null;
+    try {
+      qrDataUrl = await QRCode.toDataURL(viewerUrl, { margin: 1, width: 320 });
+    } catch (err) {
+      console.error('QR code generation failed:', err);
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ id: session.id, joinCode: session.joinCode, viewerUrl, qrDataUrl }));
     return;
   }
 
@@ -120,46 +239,45 @@ const server = http.createServer(async (req, res) => {
 
 // ---------------------------------------------------------------------------
 // WebSocket layer: host/viewer roles, §3 unified utterance contract, history
-// cache. Step 1 (連接骨架) only — no Soniox/Haiku wiring here yet. The host
-// side sends already-shaped { original, translations } and the server just
-// stamps id/ts and fans it out; later steps decide how translations get
-// filled in before this point.
+// cache — all of it scoped per session (SPEC §5). The host side sends
+// already-shaped { original, translations } and the server just stamps
+// id/ts and fans it out to that session's viewers only; later steps decide
+// how translations get filled in before this point.
+//
+// No module-level mutable room state on purpose: everything below reads a
+// `session` object resolved from the connection's own sessionId/joinCode at
+// registration time (see the `register` handler), never a shared global.
 // ---------------------------------------------------------------------------
-const HISTORY_MAX = 50;     // how many recent utterances the server keeps in memory
+const HISTORY_MAX = 50;     // how many recent utterances a session keeps in memory
 const BACKFILL_COUNT = 10;  // how many to push to a viewer immediately on connect
 const HISTORY_PAGE = 10;    // how many to return per history_request page
-
-let hostWs = null;
-const viewers = new Set();
-const history = []; // oldest → newest, capped at HISTORY_MAX
-let nextId = 1;
 
 function send(ws, data) {
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(data));
 }
 
-function broadcastToViewers(data) {
+function broadcastToViewers(session, data) {
   const payload = JSON.stringify(data);
-  for (const v of viewers) {
+  for (const v of session.viewers) {
     if (v.readyState === WebSocket.OPEN) v.send(payload);
   }
 }
 
-function sendViewerCount() {
-  send(hostWs, { type: 'viewer_count', count: viewers.size });
+function sendViewerCount(session) {
+  send(session.hostWs, { type: 'viewer_count', count: session.viewers.size });
 }
 
-function pushUtterance({ original, translations }) {
+function pushUtterance(session, { original, translations }) {
   const utterance = {
     type: 'utterance',
-    id: nextId++,
+    id: session.nextId++,
     ts: Date.now(),
     original: original || '',
     translations: translations && typeof translations === 'object' ? translations : {},
   };
-  history.push(utterance);
-  if (history.length > HISTORY_MAX) history.shift();
-  broadcastToViewers(utterance);
+  session.history.push(utterance);
+  if (session.history.length > HISTORY_MAX) session.history.shift();
+  broadcastToViewers(session, utterance);
 }
 
 const wss = new WebSocketServer({ server });
@@ -174,6 +292,7 @@ const HEARTBEAT_INTERVAL = 15000;
 
 wss.on('connection', (ws) => {
   let role = null;
+  let sessionId = null; // resolved at register time from sessionId (host) or joinCode (viewer)
   ws.isAlive = true;
   ws.on('pong', () => { ws.isAlive = true; });
 
@@ -182,23 +301,73 @@ wss.on('connection', (ws) => {
     try { msg = JSON.parse(raw); } catch { return; }
 
     if (msg.type === 'register') {
-      role = msg.role === 'host' ? 'host' : msg.role === 'viewer' ? 'viewer' : null;
+      if (msg.role === 'host') {
+        const session = typeof msg.sessionId === 'string' ? sessions.get(msg.sessionId) : null;
+        if (!session) {
+          send(ws, { type: 'register_error', reason: 'session_not_found' });
+          return;
+        }
+        role = 'host';
+        sessionId = session.id;
+        session.hostWs = ws;
+        console.log(`[host] connected session=${session.id}`);
+        sendViewerCount(session);
+      } else if (msg.role === 'viewer') {
+        const targetId = typeof msg.joinCode === 'string' ? sessionsByJoinCode.get(msg.joinCode) : null;
+        const session = targetId ? sessions.get(targetId) : null;
+        if (!session) {
+          send(ws, { type: 'register_error', reason: 'invalid_code' });
+          return;
+        }
+        role = 'viewer';
+        sessionId = session.id;
+        session.viewers.add(ws);
+        console.log(`[viewer+] session=${session.id} total=${session.viewers.size}`);
+        sendViewerCount(session);
+        send(ws, { type: 'session_status', status: session.status });
+        if (session.status === 'live') {
+          send(ws, { type: 'backfill', utterances: session.history.slice(-BACKFILL_COUNT) });
+        }
+      }
+      return;
+    }
 
-      if (role === 'host') {
-        hostWs = ws;
-        console.log('[host] connected');
-        sendViewerCount();
-      } else if (role === 'viewer') {
-        viewers.add(ws);
-        console.log(`[viewer+] total=${viewers.size}`);
-        sendViewerCount();
-        send(ws, { type: 'backfill', utterances: history.slice(-BACKFILL_COUNT) });
+    // Every non-register message operates on the session resolved above —
+    // if the connection never registered (or its session got swept), there's
+    // nothing to act on.
+    const session = sessionId ? sessions.get(sessionId) : null;
+    if (!session) return;
+
+    // Host clicked Start (SPEC §4 state machine): created → live. Idempotent
+    // — a pause/Start cycle mid-broadcast re-sends this but the session is
+    // already live, so it's a no-op rather than resetting startedAt.
+    if (role === 'host' && msg.type === 'host_start') {
+      if (session.status === 'created') {
+        session.status = 'live';
+        session.startedAt = Date.now();
+        console.log(`[session ${session.id}] live`);
+        broadcastToViewers(session, { type: 'session_status', status: 'live' });
+      }
+      return;
+    }
+
+    // Host explicitly ends the session (not the same as Pause/Stop, which
+    // only stops the mic — see host.js). live/created → ended, permanently:
+    // the join_code stops admitting anyone from this point on.
+    if (role === 'host' && msg.type === 'host_end_session') {
+      if (session.status !== 'ended') {
+        session.status = 'ended';
+        session.endedAt = Date.now();
+        console.log(`[session ${session.id}] ended`);
+        broadcastToViewers(session, { type: 'session_status', status: 'ended' });
+        session.viewers.clear();
+        session.hostWs = null;
       }
       return;
     }
 
     if (role === 'host' && msg.type === 'host_utterance') {
-      pushUtterance(msg);
+      if (session.status === 'live') pushUtterance(session, msg);
       return;
     }
 
@@ -206,46 +375,48 @@ wss.on('connection', (ws) => {
     // just relayed straight through, never stamped with an id or kept in
     // history. The eventual host_utterance for the same sentence supersedes it.
     if (role === 'host' && msg.type === 'host_interim') {
-      broadcastToViewers({
-        type: 'interim',
-        original: msg.original || '',
-        translations: msg.translations && typeof msg.translations === 'object' ? msg.translations : {},
-      });
+      if (session.status === 'live') {
+        broadcastToViewers(session, {
+          type: 'interim',
+          original: msg.original || '',
+          translations: msg.translations && typeof msg.translations === 'object' ? msg.translations : {},
+        });
+      }
       return;
     }
 
     // Explicit wipe, host-triggered only. Pausing (host just stops recording)
     // must NOT touch history — only this clears it, both server-side and on
-    // every connected viewer.
+    // every viewer of THIS session (never another session's).
     if (role === 'host' && msg.type === 'host_clear') {
-      history.length = 0;
-      nextId = 1;
-      console.log('[host] cleared history');
-      broadcastToViewers({ type: 'clear' });
+      session.history.length = 0;
+      session.nextId = 1;
+      console.log(`[session ${session.id}] cleared history`);
+      broadcastToViewers(session, { type: 'clear' });
       return;
     }
 
     // Precise reconnect catch-up (viewer2): "everything after the last id I
     // saw", not the fixed-size backfill window. id is a monotonically
-    // increasing counter per pushUtterance, so `> after` is exact — no
-    // duplicates, no gaps, as long as the id sequence hasn't been reset.
-    // If it HAS been reset (host_clear happened while this viewer was
-    // disconnected, so current ids are all <= its stale `after`), there's
-    // no valid delta to compute — send a full reset instead.
+    // increasing counter per pushUtterance (scoped to this session), so
+    // `> after` is exact — no duplicates, no gaps, as long as the id
+    // sequence hasn't been reset. If it HAS been reset (host_clear happened
+    // while this viewer was disconnected, so current ids are all <= its
+    // stale `after`), there's no valid delta to compute — send a full reset.
     if (role === 'viewer' && msg.type === 'resync') {
       const after = Number.isFinite(msg.after) ? msg.after : 0;
-      const maxId = history.length ? history[history.length - 1].id : 0;
+      const maxId = session.history.length ? session.history[session.history.length - 1].id : 0;
       if (maxId < after) {
-        send(ws, { type: 'resync', reset: true, utterances: history.slice() });
+        send(ws, { type: 'resync', reset: true, utterances: session.history.slice() });
       } else {
-        send(ws, { type: 'resync', reset: false, utterances: history.filter((u) => u.id > after) });
+        send(ws, { type: 'resync', reset: false, utterances: session.history.filter((u) => u.id > after) });
       }
       return;
     }
 
     if (role === 'viewer' && msg.type === 'history_request') {
       const before = Number.isFinite(msg.before) ? msg.before : Infinity;
-      const older = history.filter((u) => u.id < before);
+      const older = session.history.filter((u) => u.id < before);
       const page = older.slice(-HISTORY_PAGE);
       const hasMore = older.length > page.length;
       send(ws, { type: 'history_batch', utterances: page, hasMore });
@@ -254,13 +425,15 @@ wss.on('connection', (ws) => {
   });
 
   ws.on('close', () => {
+    const session = sessionId ? sessions.get(sessionId) : null;
+    if (!session) return;
     if (role === 'host') {
-      if (hostWs === ws) hostWs = null;
-      console.log('[host] disconnected');
+      if (session.hostWs === ws) session.hostWs = null;
+      console.log(`[host] disconnected session=${session.id}`);
     } else if (role === 'viewer') {
-      viewers.delete(ws);
-      console.log(`[viewer-] total=${viewers.size}`);
-      sendViewerCount();
+      session.viewers.delete(ws);
+      console.log(`[viewer-] session=${session.id} total=${session.viewers.size}`);
+      sendViewerCount(session);
     }
   });
 });
