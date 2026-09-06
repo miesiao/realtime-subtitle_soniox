@@ -1,6 +1,29 @@
 import { SonioxClient } from '/vendor/soniox-client.mjs';
 import * as OpenCC from '/vendor/opencc-cn2t.mjs';
 
+// --- Host password gate (protects the one endpoint that costs money) ------
+// Not a real account system — just a shared password kept in localStorage.
+// Asked immediately on page load (not lazily on first recording) so a host
+// can't get halfway into the UI before hitting the gate.
+const HOST_SECRET_STORAGE_KEY = 'hostSecret';
+
+function getStoredHostSecret() {
+  return localStorage.getItem(HOST_SECRET_STORAGE_KEY);
+}
+
+function promptForHostSecret() {
+  const secret = window.prompt('請輸入密碼：') || '';
+  localStorage.setItem(HOST_SECRET_STORAGE_KEY, secret);
+  return secret;
+}
+
+function clearStoredHostSecret() {
+  localStorage.removeItem(HOST_SECRET_STORAGE_KEY);
+}
+
+let hostSecret = getStoredHostSecret();
+if (!hostSecret) hostSecret = promptForHostSecret();
+
 // Soniox's language codes only have generic "zh" — no zh-Hant/zh-Hans, and
 // there is no API parameter to force Traditional output. In practice the
 // model often emits Simplified. So we force-convert everything to
@@ -148,36 +171,14 @@ function sendUtterance(original, translation) {
   logSent(trimmedOriginal, translations);
 }
 
-// --- Host password gate (protects the one endpoint that costs money) ------
-// Not a real account system — just a shared password kept in localStorage
-// so the host isn't prompted every single recording session.
-const HOST_SECRET_STORAGE_KEY = 'hostSecret';
-
-function getStoredHostSecret() {
-  return localStorage.getItem(HOST_SECRET_STORAGE_KEY);
-}
-
-function promptForHostSecret() {
-  const secret = window.prompt('請輸入 Host 密碼：') || '';
-  localStorage.setItem(HOST_SECRET_STORAGE_KEY, secret);
-  return secret;
-}
-
-function clearStoredHostSecret() {
-  localStorage.removeItem(HOST_SECRET_STORAGE_KEY);
-}
-
-function requestTemporaryKey(hostSecret) {
+function requestTemporaryKey(secret) {
   return fetch('/api/temporary-key', {
     method: 'POST',
-    headers: { 'x-host-secret': hostSecret },
+    headers: { 'x-host-secret': secret },
   });
 }
 
 async function fetchTemporaryKey() {
-  let hostSecret = getStoredHostSecret();
-  if (!hostSecret) hostSecret = promptForHostSecret();
-
   let res = await requestTemporaryKey(hostSecret);
   if (res.status === 401) {
     clearStoredHostSecret();
@@ -403,6 +404,31 @@ function parseTerms(raw) {
     .filter(Boolean);
 }
 
+// --- Recording error messages ----------------------------------------------
+// The Soniox client SDK wraps getUserMedia failures in typed errors with a
+// `.code` (see @soniox/client's audio/errors.ts: AudioPermissionError,
+// AudioDeviceError, AudioUnavailableError) — translate those into something
+// a non-technical host can act on, instead of the bare string "error".
+const NON_RETRIABLE_ERROR_CODES = new Set(['permission_denied', 'device_not_found', 'audio_unavailable']);
+
+function describeRecordingError(err) {
+  const code = err && err.code;
+  const message = (err && err.message) || String(err);
+  if (code === 'permission_denied') {
+    return '麥克風權限被拒絕，請點瀏覽器網址列的麥克風/鎖頭圖示允許存取，再按 Start 重試。';
+  }
+  if (code === 'device_not_found') {
+    if (/already in use|not readable/i.test(message)) {
+      return '麥克風可能正被其他程式占用（例如視訊通話軟體），請關閉後再按 Start 重試。';
+    }
+    return '找不到麥克風裝置，請確認已接上麥克風或耳麥，再按 Start 重試。';
+  }
+  if (code === 'audio_unavailable') {
+    return '此瀏覽器或連線環境無法使用麥克風（可能不是用 https 或 localhost 開啟，或瀏覽器版本不支援錄音），請確認後再試。';
+  }
+  return `error: ${message}`;
+}
+
 // --- Soniox session (auto-restart on unexpected drop) -----------------------
 // `userWantsRecording` is the source of truth for "should a Soniox session
 // be running right now" — true from Start until an explicit Stop, false
@@ -469,16 +495,26 @@ function startRecording() {
   });
   recording.on('result', handleResult);
   recording.on('endpoint', handleEndpoint);
+  // The SDK emits 'error' (with the real Error object) and then a
+  // 'state_change' to 'error' (just the state name, no error object) right
+  // after — stash the friendly message here so state_change doesn't clobber
+  // it with the bare word "error".
+  let lastRecordingErrorMessage = null;
   recording.on('error', (err) => {
     console.error('Soniox error:', err);
-    statusEl.textContent = `error: ${err.message || err}`;
-    setUiRecording(false);
-    maybeAutoReconnectSoniox();
+    lastRecordingErrorMessage = describeRecordingError(err);
+    if (NON_RETRIABLE_ERROR_CODES.has(err && err.code)) {
+      userWantsRecording = false; // a mic/permission problem won't fix itself by retrying
+    }
   });
   recording.on('state_change', ({ new_state }) => {
-    if (new_state === 'stopped' || new_state === 'canceled' || new_state === 'error') {
+    if (new_state === 'stopped' || new_state === 'canceled') {
       setUiRecording(false);
       statusEl.textContent = new_state;
+    } else if (new_state === 'error') {
+      setUiRecording(false);
+      statusEl.textContent = lastRecordingErrorMessage || 'error: 連線發生未知錯誤';
+      lastRecordingErrorMessage = null;
       maybeAutoReconnectSoniox();
     }
   });
