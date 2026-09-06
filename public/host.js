@@ -132,9 +132,11 @@ function logSent(original, translations) {
 }
 
 // Send one finalized segment to the server as the §3 contract's raw
-// ingredients — server stamps id/ts and broadcasts. If Soniox produced no
-// separate translation for this segment (e.g. source already == target),
-// fall back to the original text so viewers never see an empty line.
+// ingredients — server stamps id/ts and broadcasts. handleResult already
+// mirrors 'none'-status (passthrough) tokens into `translation`, so this
+// empty-string fallback is just a last-resort backstop (e.g. a pair that
+// somehow closed with zero tokens at all) — it should rarely fire in
+// practice, but still guarantees viewers never see an empty line.
 function sendUtterance(original, translation) {
   const trimmedOriginal = original.trim();
   if (!trimmedOriginal) return;
@@ -285,12 +287,25 @@ function renderAll() {
 
 // Only is_final tokens ever reach pairOriginal/pairTranslation — non-final
 // tokens only update the local monitoring panes above.
+//
+// translation_status 'none' = Soniox recognized this token but performed no
+// translation on it, because it's already in the target language (e.g. host
+// speaks Chinese with target_language 'zh' — pure dictation, no translation
+// needed for that stretch of speech). Such a token is *content* that must
+// still reach viewers' translation side, so it's mirrored into both
+// pairOriginal and pairTranslation (and both streams' live tokens) rather
+// than only landing in the original side. This also covers a host who
+// mostly speaks the target language but occasionally switches — those
+// passthrough words would otherwise vanish from the translation output
+// entirely, since sendUtterance's whole-pair fallback only helps when an
+// ENTIRE pair has zero translation content.
 function handleResult(result) {
   originalStream.nonFinalTokens = [];
   translationStream.nonFinalTokens = [];
 
   for (const token of result.tokens) {
     const isTranslation = token.translation_status === 'translation';
+    const isPassthrough = token.translation_status === 'none';
     const stream = isTranslation ? translationStream : originalStream;
     if (token.is_final) {
       stream.finalItems.push(token);
@@ -299,9 +314,15 @@ function handleResult(result) {
         flushPair(); // translation chunk just ended and a new original chunk started — pair complete
       }
       pairLastSide = side;
-      (side === 'trans' ? pairTranslation : pairOriginal).push(token.text);
+      if (isTranslation) {
+        pairTranslation.push(token.text);
+      } else {
+        pairOriginal.push(token.text);
+        if (isPassthrough) pairTranslation.push(token.text);
+      }
     } else {
       stream.nonFinalTokens.push(token);
+      if (isPassthrough) translationStream.nonFinalTokens.push(token);
     }
   }
   renderAll();
