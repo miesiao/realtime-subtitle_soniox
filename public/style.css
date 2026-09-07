@@ -59,6 +59,14 @@ header h1 { font-size: 18px; margin: 0 0 4px; }
 .session-info-row a { color: #4dabf7; }
 #qrImg { width: 140px; height: 140px; border-radius: 6px; background: #fff; padding: 6px; }
 #endSessionBtn { background: #7a2a2a; }
+.session-error {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: #ff8a8a;
+}
+.session-error[hidden] { display: none; }
 
 .controls {
   display: flex;

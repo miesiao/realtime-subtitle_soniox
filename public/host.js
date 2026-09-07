@@ -87,50 +87,14 @@ const sentLogEl = document.getElementById('sentLog');
 const joinCodeEl = document.getElementById('joinCode');
 const viewerLinkEl = document.getElementById('viewerLink');
 const qrImgEl = document.getElementById('qrImg');
+const sessionErrorEl = document.getElementById('sessionError');
+const sessionErrorTextEl = document.getElementById('sessionErrorText');
+const retrySessionBtn = document.getElementById('retrySessionBtn');
 
 const LANG_CLASS = { zh: 'lang-zh', en: 'lang-en', es: 'lang-es' };
 function langClass(lang) {
   return LANG_CLASS[lang] || 'lang-other';
 }
-
-// --- Session creation (SPEC §2/§4: internal id + public join_code + QR) ----
-// One session per page load — "開一場即生成新亂碼網址", Meet-mode. The
-// internal id only ever travels over this authenticated fetch response and
-// this page's own WS registration; it never gets embedded in the QR/viewer
-// link (that's `joinCode`, the capability-based ticket — see §3).
-let currentSession = null; // { id, joinCode, viewerUrl, qrDataUrl }
-
-function requestCreateSession(secret) {
-  return fetch('/api/sessions', {
-    method: 'POST',
-    headers: { 'x-host-secret': secret },
-  });
-}
-
-async function createSession() {
-  let res = await requestCreateSession(hostSecret);
-  if (res.status === 401) {
-    clearStoredHostSecret();
-    alert('密碼錯誤，請重新輸入');
-    hostSecret = promptForHostSecret();
-    res = await requestCreateSession(hostSecret);
-  }
-  if (!res.ok) throw new Error('Failed to create session');
-  return res.json();
-}
-
-function renderSession(session) {
-  joinCodeEl.textContent = session.joinCode;
-  viewerLinkEl.href = session.viewerUrl;
-  viewerLinkEl.textContent = session.viewerUrl;
-  if (session.qrDataUrl) {
-    qrImgEl.src = session.qrDataUrl;
-    qrImgEl.hidden = false;
-  }
-}
-
-currentSession = await createSession();
-renderSession(currentSession);
 
 // --- Server WS connection (host role) --------------------------------------
 // Independent of Soniox recording state — connects on page load so host can
@@ -141,6 +105,12 @@ renderSession(currentSession);
 // 4s → 8s, capped at 10s, then fixed 10s retries) — but unlike viewer's
 // low-key banner, a host disconnect means EVERY viewer goes dark, so this
 // gets a loud, impossible-to-miss warning instead (see hostDisconnectBannerEl).
+//
+// Declared here (above session creation) rather than below it: initSession()
+// calls connectWs() as soon as a session exists, and connectWs() closes over
+// ws/wsReconnectTimer/wsReconnectAttempt below — those `let` bindings must
+// already be past their temporal dead zone by the time that call happens, or
+// it throws a ReferenceError.
 const hostDisconnectBannerEl = document.getElementById('hostDisconnectBanner');
 const WS_RECONNECT_BASE_MS = 1000;
 const WS_RECONNECT_MAX_MS = 10000;
@@ -190,7 +160,65 @@ function connectWs() {
     }
   });
 }
-connectWs();
+
+// --- Session creation (SPEC §2/§4: internal id + public join_code + QR) ----
+// One session per page load — "開一場即生成新亂碼網址", Meet-mode. The
+// internal id only ever travels over this authenticated fetch response and
+// this page's own WS registration; it never gets embedded in the QR/viewer
+// link (that's `joinCode`, the capability-based ticket — see §3).
+let currentSession = null; // { id, joinCode, viewerUrl, qrDataUrl }
+
+function requestCreateSession(secret) {
+  return fetch('/api/sessions', {
+    method: 'POST',
+    headers: { 'x-host-secret': secret },
+  });
+}
+
+async function createSession() {
+  let res = await requestCreateSession(hostSecret);
+  if (res.status === 401) {
+    clearStoredHostSecret();
+    alert('密碼錯誤，請重新輸入');
+    hostSecret = promptForHostSecret();
+    res = await requestCreateSession(hostSecret);
+  }
+  if (!res.ok) throw new Error('Failed to create session');
+  return res.json();
+}
+
+function renderSession(session) {
+  joinCodeEl.textContent = session.joinCode;
+  viewerLinkEl.href = session.viewerUrl;
+  viewerLinkEl.textContent = session.viewerUrl;
+  if (session.qrDataUrl) {
+    qrImgEl.src = session.qrDataUrl;
+    qrImgEl.hidden = false;
+  }
+}
+
+// A failure here (bad password entered twice, server briefly unreachable,
+// etc.) must NOT silently kill the rest of this module — as a top-level
+// await, an uncaught rejection here would stop every statement below it
+// from ever running (WS connect, Start/Stop/End wiring, all of it), leaving
+// a host staring at a page that looks loaded but does nothing, with no
+// visible error. So this is caught, surfaced on-page, and retryable instead.
+async function initSession() {
+  try {
+    currentSession = await createSession();
+    renderSession(currentSession);
+    sessionErrorEl.hidden = true;
+    connectWs();
+  } catch (err) {
+    console.error('Failed to create session:', err);
+    joinCodeEl.textContent = '（尚未建立）';
+    sessionErrorTextEl.textContent = `建立場次失敗：${err.message}`;
+    sessionErrorEl.hidden = false;
+  }
+}
+retrySessionBtn.addEventListener('click', () => { initSession(); });
+
+await initSession();
 
 function logSent(original, translations) {
   const line = document.createElement('div');
