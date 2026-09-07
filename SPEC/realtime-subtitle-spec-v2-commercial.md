@@ -1,6 +1,6 @@
 # 即時字幕系統 — 商業化與資料模型規格（v2）
 
-> 本文件是 `realtime-subtitle-spec.md`（技術層：角色 / utterance contract / viewer / host 顯示）的\*\*上層增補\*\*。
+> 本文件是 `realtime-subtitle-spec.md`（技術層：角色 / utterance contract / viewer / host 顯示）的\\\*\\\*上層增補\\\*\\\*。
 > 兩份互補：既有 spec 管「一場怎麼跑」，本文件管「多場、帳號、計費、逐字稿留存」。
 > 術語沿用既有 spec：host（主講者）、viewer（聽眾）、utterance（一句 final 字幕）。
 
@@ -35,50 +35,50 @@
 |-|-|-|
 |`id`|PK（內部永久）|帳號主鍵|
 |`email`|string, unique|登入帳號|
-|`auth\_\*`|—|認證資料（依所選方案，如密碼雜湊 / OAuth sub）|
+|`auth\\\_\\\*`|—|認證資料（依所選方案，如密碼雜湊 / OAuth sub）|
 |`plan`|enum(`free`, `pro`, ...)|方案等級，決定額度與並發上限|
-|`created\_at`|timestamp||
+|`created\\\_at`|timestamp||
 
 ### Session（＝一場，計費發生在這層）
 
 |欄位|型別|說明|
 |-|-|-|
 |`id`|PK（**內部永久主鍵**）|逐字稿、計費、擁有權都掛這；**永不進入公開網址**|
-|`user\_id`|FK → User|擁有者|
+|`user\\\_id`|FK → User|擁有者|
 |`name`|string|**可改名**；預設自動帶（如 `2026-09-06 中文場`），使用者可覆寫|
-|`join\_code`|string, unique|**對外短亂碼**（如 `abc-defg-hjk`），聽眾用此進場；夠長、隨機、不可猜|
+|`join\\\_code`|string, unique|**對外短亂碼**（如 `abc-defg-hjk`），聽眾用此進場；夠長、隨機、不可猜|
 |`status`|enum|見 §4 狀態機|
-|`source\_lang`|string|來源語言|
-|`target\_langs`|string\[]|目標語言（可多語）|
-|`cleaned\_transcript`|text, nullable|散場整理後的逐字稿（付費）|
-|`processing\_status`|enum, nullable|`idle` / `processing` / `ready` / `failed`|
-|`started\_at`|timestamp, nullable|開播時間（計費起點）|
-|`ended\_at`|timestamp, nullable|散場時間（計費終點）|
+|`source\\\_lang`|string|來源語言|
+|`target\\\_langs`|string\[]|目標語言（可多語）|
+|`cleaned\\\_transcript`|text, nullable|散場整理後的逐字稿（付費）|
+|`processing\\\_status`|enum, nullable|`idle` / `processing` / `ready` / `failed`|
+|`started\\\_at`|timestamp, nullable|開播時間（計費起點）|
+|`ended\\\_at`|timestamp, nullable|散場時間（計費終點）|
 
 ### TranscriptLine（直播中逐句留存，append-only）
 
 |欄位|型別|說明|
 |-|-|-|
 |`id`|PK||
-|`session\_id`|FK → Session（**內部 id**）||
+|`session\\\_id`|FK → Session（**內部 id**）||
 |`seq`|int|場內序號（沿用既有 utterance id 概念）|
 |`ts`|timestamp||
-|`original\_text`|text|**只認真存原文**（source of truth）；翻譯是衍生物，要用時再生|
+|`original\\\_text`|text|**只認真存原文**（source of truth）；翻譯是衍生物，要用時再生|
 
-> \*\*原則\*\*：只增不改（append-only）。直播中每句 final \*\*默默寫入\*\*，不影響前端顯示節奏。
+> \\\*\\\*原則\\\*\\\*：只增不改（append-only）。直播中每句 final \\\*\\\*默默寫入\\\*\\\*，不影響前端顯示節奏。
 
 ### UsageLedger（每場散場結算一筆，append-only）
 
 |欄位|型別|說明|
 |-|-|-|
 |`id`|PK||
-|`user\_id`|FK → User||
-|`session\_id`|FK → Session||
+|`user\\\_id`|FK → User||
+|`session\\\_id`|FK → Session||
 |`minutes`|number|本場時長|
-|`num\_langs`|int|本場目標語言數|
-|`created\_at`|timestamp||
+|`num\\\_langs`|int|本場目標語言數|
+|`created\\\_at`|timestamp||
 
-> \*\*原則\*\*：永不修改舊紀錄。「本月用量」= 本月 ledger 加總。計費會被質疑，必須能逐筆攤開給客戶看數字怎麼來的。
+> \\\*\\\*原則\\\*\\\*：永不修改舊紀錄。「本月用量」= 本月 ledger 加總。計費會被質疑，必須能逐筆攤開給客戶看數字怎麼來的。
 
 \---
 
@@ -87,9 +87,9 @@
 每場有**兩個不同用途的識別碼，絕不共用**：
 
 * **內部 `id`（永久、私有）**：關聯逐字稿 / 計費 / 擁有權。**永遠不放進公開網址**（否則會被猜號、遍歷）。
-* **公開 `join\_code`（對外、亂碼）**：聽眾入場券，capability-based——**持有即可看，不驗身分**。
+* **公開 `join\\\_code`（對外、亂碼）**：聽眾入場券，capability-based——**持有即可看，不驗身分**。
 
-聽眾流程：掃 QR → 帶 `join\_code` 落地 → 後端把 `join\_code` 翻成內部 `id` → 檢查 `status` 是否 `live`。
+聽眾流程：掃 QR → 帶 `join\\\_code` 落地 → 後端把 `join\\\_code` 翻成內部 `id` → 檢查 `status` 是否 `live`。
 散場不需要「讓 join\_code 過期」的額外邏輯——**聽眾能不能進，只看 `status` 是不是 `live`**。
 
 \---
@@ -120,13 +120,13 @@ created ──(host 開播)──▶ live ──(停止 / 靜音超時 / 額度�
 
 ## 5\. 多 Session 隔離（硬約束 — 針對現有 server.js 的重構）
 
-> \*\*現況診斷\*\*：目前 `server.js` 是\*\*純單場架構、零隔離\*\*。兩場同時開會發生「資料串場」（字幕混場、host 互相覆蓋、清歷史連坐）。單場測正常，兩場並行才爆。
+> \\\*\\\*現況診斷\\\*\\\*：目前 `server.js` 是\\\*\\\*純單場架構、零隔離\\\*\\\*。兩場同時開會發生「資料串場」（字幕混場、host 互相覆蓋、清歷史連坐）。單場測正常，兩場並行才爆。
 
 ### 硬約束（給 Claude Code 的紅線）
 
-> \*\*禁止任何 module-level 可變狀態（no global mutable state）。\*\*
-> 所有 runtime 狀態（Soniox 連線、`viewers`、`history`、`hostWs`、`nextId`）\*\*必須掛在 session 實例上，以 `session\_id` 隔離\*\*。
-> 廣播\*\*只能發給該 session 的 viewers\*\*。
+> \\\*\\\*禁止任何 module-level 可變狀態（no global mutable state）。\\\*\\\*
+> 所有 runtime 狀態（Soniox 連線、`viewers`、`history`、`hostWs`、`nextId`）\\\*\\\*必須掛在 session 實例上，以 `session\\\_id` 隔離\\\*\\\*。
+> 廣播\\\*\\\*只能發給該 session 的 viewers\\\*\\\*。
 
 ### 重構對照（現有 → 目標）
 
@@ -135,22 +135,22 @@ created ──(host 開播)──▶ live ──(停止 / 靜音超時 / 額度�
 |`const soniox = new SonioxNodeClient()`（L18）|全域共用一條連線|每場自己的連線，綁在 session 物件|
 |`let hostWs = null`（L108）|單一 host 插槽，第二個 host 覆蓋第一個|`session.hostWs`|
 |`const viewers = new Set()`（L109）|所有聽眾同一 set，不分房|`session.viewers`|
-|`const history = \[]`（L110）|全場字幕塞同一坨|`session.history`|
+|`const history = \\\[]`（L110）|全場字幕塞同一坨|`session.history`|
 |`let nextId = 1`（L111）|全域序號|`session.nextId`（場內序號）|
 |`broadcastToViewers`（L117–125）|廣播給所有連線|只遍歷 `session.viewers`|
-|`history.push`（L136–138）|混場|寫入 `session.history` + `TranscriptLine(session\_id)`|
-|`hostWs = ws`（L164）、`viewers.add`（L168）|無 session 歸屬|用 `join\_code` 找到 session 再掛入|
+|`history.push`（L136–138）|混場|寫入 `session.history` + `TranscriptLine(session\\\_id)`|
+|`hostWs = ws`（L164）、`viewers.add`（L168）|無 session 歸屬|用 `join\\\_code` 找到 session 再掛入|
 |`history.length = 0`（L197 clear）|清掉**所有**場的歷史|只清該 session|
 |斷線清理（L234、L237）|動全域|動該 session|
 
 ### 建議結構
 
 ```
-const sessions = new Map();  // key: session\_id → { hostWs, viewers:Set, history:\[], sonioxConn, nextId, ... }
+const sessions = new Map();  // key: session\\\_id → { hostWs, viewers:Set, history:\\\[], sonioxConn, nextId, ... }
 ```
 
-* 每個 viewer / host 連線一進來，先用 `join\_code` 對應到 session\_id，取出（或建立）該 session 物件。
-* 所有讀寫都經過 `sessions.get(session\_id)`，**任何地方都不再有裸露的全域字幕 / 連線變數**。
+* 每個 viewer / host 連線一進來，先用 `join\\\_code` 對應到 session\_id，取出（或建立）該 session 物件。
+* 所有讀寫都經過 `sessions.get(session\\\_id)`，**任何地方都不再有裸露的全域字幕 / 連線變數**。
 * session `ended` 時清掉 Map 裡的 runtime 物件（釋放記憶體），但**資料庫的 Session / TranscriptLine 原封不動保留**。
 
 ### 這一個重構同時解掉 B 和 A
@@ -171,7 +171,7 @@ const sessions = new Map();  // key: session\_id → { hostWs, viewers:Set, hist
 ### 兩條管線必須分開（不可混用）
 
 * **直播中（即時管線）**：Soniox → utterance → 廣播給 viewers，同時**默默** `append` 到 `TranscriptLine`。追求快、順，**絕不可為了整理漂亮而延遲字幕**。
-* **散場後（批次管線）**：`ended` 觸發 → 讀出該 session 全部 `TranscriptLine.original\_text` → **再送一次 Claude** 整理（分段 / 去口頭禪贅字 / 補標點 / 下小標 / 摘要）→ 寫回 `Session.cleaned\_transcript` → `status = ready`。批次、不趕時間，可用較好的模型。
+* **散場後（批次管線）**：`ended` 觸發 → 讀出該 session 全部 `TranscriptLine.original\\\_text` → **再送一次 Claude** 整理（分段 / 去口頭禪贅字 / 補標點 / 下小標 / 摘要）→ 寫回 `Session.cleaned\\\_transcript` → `status = ready`。批次、不趕時間，可用較好的模型。
 
 ### 隱私與權限
 
@@ -181,6 +181,86 @@ const sessions = new Map();  // key: session\_id → { hostWs, viewers:Set, hist
 ### 「可改名 / 歷史場次 / 逐字稿」是同一個畫面
 
 使用者事後回來的地方是**一張自己的場次清單**，在那裡：改名、看狀態、（付費）讀整理好的逐字稿、下載。不是三個功能，是一頁。
+
+
+
+\## 6.5 階段 2 施作細節（持久層）
+
+
+
+> 階段 2 的本質不是「加個 append」，而是系統第一次長出「記憶」——引進持久層（資料庫）。以下決策先定死，避免 Claude Code 自作主張。
+
+
+
+\### 持久層：用 Railway PostgreSQL（不是 SQLite、不是寫檔案）
+
+
+
+\*\*關鍵原因（務必遵守）\*\*：Railway 的 app 容器檔案系統是\*\*短暫的（ephemeral）\*\*，每次重新部署 / 重啟就清空。因此\*\*嚴禁\*\*把逐字稿寫成容器內檔案，或用 SQLite 存本機檔——本機測正常，上線部署幾次後資料會離奇消失。持久化必須用\*\*容器外的獨立服務\*\*，即 Railway 附加的 Postgres。連線字串以環境變數 `DATABASE\_URL` 注入，不進 Git。
+
+
+
+\### 記憶體 vs 資料庫的職責分工（硬性原則）
+
+
+
+\- \*\*留在記憶體\*\*（runtime、易失、要快）：WebSocket 連線（`hostWs`、`viewers`）、interim token、即時廣播。用完即丟。
+
+\- \*\*落地資料庫\*\*（持久、是唯一真相）：Session metadata（id、join\_code、name、status、時間）、TranscriptLine（原文）、cleaned\_transcript。
+
+\- \*\*一句話\*\*：DB 是 source of truth，記憶體物件只是 live 期間的即時鏡像。容器重啟、記憶體沒了，DB 還在，逐字稿不掉。
+
+
+
+\### live 期間逐句寫入（不可等散場）
+
+
+
+`live` 中每產生一句 final，\*\*當下就 INSERT 一筆 TranscriptLine\*\*。不可累積在記憶體、等散場才批次寫——因為 §5 的定期清掃可能先把該 session 的記憶體物件回收掉，等散場才寫＝在賭程式不會先崩潰或被清掃。
+
+
+
+\### 散場批次整理的狀態流轉
+
+
+
+`ended` 觸發 → 讀該場全部 `TranscriptLine.original\_text` → 送 Claude 整理 → 寫回 `Session.cleaned\_transcript`。
+
+`processing\_status`：`idle → processing → ready`；整理失敗寫 `failed` 並可重試（不可讓一次 API 失敗就永久卡住）。
+
+
+
+\### 階段 2 的範圍邊界（避免膨脹）
+
+
+
+\*\*階段 2 做\*\*：
+
+1\. 接上 Railway Postgres，建兩張表：`Session`、`TranscriptLine`（User / UsageLedger 留階段 3）。
+
+2\. `POST /api/sessions` 建場時在 DB 寫一筆（`status=created`），後續狀態轉換 UPDATE 同一筆。
+
+3\. live 期間逐句 INSERT TranscriptLine。
+
+4\. `ended` 觸發批次整理，寫回 cleaned\_transcript + processing\_status。
+
+5\. 散場後 host 端有一個查看 / 下載整理結果的入口（單場即可，先不做清單頁）。
+
+6\. 順手可做：`UPDATE session.name`（host 開場當下改這一場名字）。
+
+
+
+\*\*推到階段 3（本階段不做）\*\*：
+
+\- User 帳號、「我的場次清單」頁（清單要查「我的」歷史，依賴 user 歸屬）。
+
+\- 付費牆（散場整理會呼叫 Anthropic API＝燒錢；階段 2 先讓管線能動，收費開關階段 3 上）。
+
+\- 回頭在清單裡改名（依賴清單頁）。
+
+
+
+> 切分理由：階段 2 專心打通「內容能否安全留存、能否被整理出來」這條命脈，它不依賴帳號即可獨立驗證。帳號 / 清單 / 收費是「誰擁有、誰付錢」的另一層，階段 3 疊上去最乾淨。
 
 \---
 
@@ -208,31 +288,32 @@ const sessions = new Map();  // key: session\_id → { hostWs, viewers:Set, hist
 
 ## 9\. 建議施作順序（先做能動的再迭代）
 
-> 每階段都在「多 session 隔離」的地基上做，\*\*第一階段就先把全域狀態重構掉\*\*，不要等。
+> 每階段都在「多 session 隔離」的地基上做，\\\*\\\*第一階段就先把全域狀態重構掉\\\*\\\*，不要等。
 
 1. **場次骨架 + 多 session 隔離（地基）**
 
    * 建 `sessions` Map，把現有全域狀態全部搬進 session 物件（§5 重構對照）。
-   * `create → 生 join\_code + QR → start/stop` 狀態機。
+   * `create → 生 join\\\_code + QR → start/stop` 狀態機。
    * 把**現成的 Soniox**（既有 spec 已完成的部分）包進 `live`，每場一條連線。
    * 驗收：**兩場同時開，字幕不串場、清歷史不連坐**。
-2. **逐字稿留存 + 散場整理**
+2. **逐字稿留存 + 散場整理 （詳見 §6.5）**
 
-   * `live` 中每句 final append 到 `TranscriptLine`。
-   * `ended` 觸發批次任務 → Claude 整理 → 寫回 `cleaned\_transcript` → `ready`。
-   * 場次清單頁（改名 / 看狀態 / 讀逐字稿 / 下載）。
+   * 引進 Railway Postgres 持久層，建 `Session` / `TranscriptLine` 兩表。
+   * &#x20;  - `live` 中每句 final 逐句 INSERT（不等散場）。
+   * &#x20;  - `ended` 觸發批次整理 → Claude → 寫回 `cleaned\_transcript` → `ready`（失敗可重試）。
+   * &#x20;  - 範圍邊界：帳號 / 清單頁 / 付費牆推階段 3。
 3. **帳號與計費**
 
    * 登入、`User.plan`、額度扣減（讀 UsageLedger 加總）。
    * 並發上限（`plan` → 同時可開場數）。
    * 把「逐字稿留存」設成付費牆。
    * 成本硬保護：靜音斷線、單場上限、額度見底停播。
-   * 拆止血：正式登入上線後，\*\*移除主線的臨時 `HOST\_SECRET` 密碼牆\*\*，改由帳號登入驗證 `/api/temporary-key`。不可讓「臨時共用密碼」與「正式帳號登入」兩套 auth 並存——最容易留下沒收乾淨的舊入口。
+   * 拆止血：正式登入上線後，\*\*移除主線的臨時 `HOST\\\_SECRET` 密碼牆\*\*，改由帳號登入驗證 `/api/temporary-key`。不可讓「臨時共用密碼」與「正式帳號登入」兩套 auth 並存——最容易留下沒收乾淨的舊入口。
    * 驗收：`curl -X POST /api/temporary-key`（不帶登入）須回 401；確認舊的 `x-host-secret` 路徑已無效。
 
 \---
 
 ## 附：可直接餵給 Claude Code 的核心指令摘要
 
-> 建立 `sessions = new Map()`，key 為 session\_id。移除 `server.js` 中所有 module-level 的 `hostWs` / `viewers` / `history` / `nextId` / 共用 `soniox`，改為每個 session 物件各自持有。廣播只發給 `session.viewers`。聽眾以 `join\_code` 對應 session，不得將內部 `id` 放入任何公開網址。禁止任何全域可變狀態。
+> 建立 `sessions = new Map()`，key 為 session\\\_id。移除 `server.js` 中所有 module-level 的 `hostWs` / `viewers` / `history` / `nextId` / 共用 `soniox`，改為每個 session 物件各自持有。廣播只發給 `session.viewers`。聽眾以 `join\\\_code` 對應 session，不得將內部 `id` 放入任何公開網址。禁止任何全域可變狀態。
 

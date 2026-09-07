@@ -90,6 +90,14 @@ const qrImgEl = document.getElementById('qrImg');
 const sessionErrorEl = document.getElementById('sessionError');
 const sessionErrorTextEl = document.getElementById('sessionErrorText');
 const retrySessionBtn = document.getElementById('retrySessionBtn');
+const sessionNameInput = document.getElementById('sessionNameInput');
+const renameBtn = document.getElementById('renameBtn');
+const renameStatusEl = document.getElementById('renameStatus');
+const transcriptSectionEl = document.getElementById('transcriptSection');
+const transcriptStatusEl = document.getElementById('transcriptStatus');
+const transcriptTextEl = document.getElementById('transcriptText');
+const retryTranscriptBtn = document.getElementById('retryTranscriptBtn');
+const downloadTranscriptBtn = document.getElementById('downloadTranscriptBtn');
 
 const LANG_CLASS = { zh: 'lang-zh', en: 'lang-en', es: 'lang-es' };
 function langClass(lang) {
@@ -191,11 +199,123 @@ function renderSession(session) {
   joinCodeEl.textContent = session.joinCode;
   viewerLinkEl.href = session.viewerUrl;
   viewerLinkEl.textContent = session.viewerUrl;
+  sessionNameInput.value = session.name || '';
   if (session.qrDataUrl) {
     qrImgEl.src = session.qrDataUrl;
     qrImgEl.hidden = false;
   }
 }
+
+// Generic authenticated JSON fetch for the phase-2 host-only endpoints
+// (rename, transcript status/retry) — same 401-reprompt pattern as
+// requestCreateSession/requestTemporaryKey above.
+async function hostFetchJson(url, options = {}) {
+  const doFetch = (secret) => fetch(url, {
+    ...options,
+    headers: { ...(options.headers || {}), 'x-host-secret': secret },
+  });
+  let res = await doFetch(hostSecret);
+  if (res.status === 401) {
+    clearStoredHostSecret();
+    alert('密碼錯誤，請重新輸入');
+    hostSecret = promptForHostSecret();
+    res = await doFetch(hostSecret);
+  }
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Request failed (${res.status})`);
+  }
+  return res.json();
+}
+
+renameBtn.addEventListener('click', async () => {
+  if (!currentSession) return;
+  const name = sessionNameInput.value.trim();
+  if (!name) { renameStatusEl.textContent = '名稱不可為空'; return; }
+  renameBtn.disabled = true;
+  renameStatusEl.textContent = '改名中…';
+  try {
+    const result = await hostFetchJson(`/api/sessions/${currentSession.id}/name`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+    currentSession.name = result.name;
+    renameStatusEl.textContent = '已更新';
+  } catch (err) {
+    console.error('Rename failed:', err);
+    renameStatusEl.textContent = `改名失敗：${err.message}`;
+  } finally {
+    renameBtn.disabled = false;
+  }
+});
+
+// --- Post-session transcript status (SPEC §6.5 points 5/6) ------------------
+// Single-session view only — no "my sessions" list, that's phase 3. Starts
+// polling right after host_end_session is sent; keeps polling while
+// processing_status is null/'processing', stops once it settles into
+// 'ready' or 'failed'.
+let transcriptPollTimer = null;
+const TRANSCRIPT_POLL_MS = 3000;
+const TRANSCRIPT_STATUS_LABELS = { processing: '整理中…', ready: '完成，可下載', failed: '整理失敗' };
+
+function renderTranscriptStatus(data) {
+  transcriptSectionEl.hidden = false;
+  transcriptStatusEl.textContent = TRANSCRIPT_STATUS_LABELS[data.processingStatus] || '準備中…';
+  retryTranscriptBtn.hidden = data.processingStatus !== 'failed';
+  if (data.processingStatus === 'ready' && data.cleanedTranscript) {
+    transcriptTextEl.textContent = data.cleanedTranscript;
+    downloadTranscriptBtn.hidden = false;
+    downloadTranscriptBtn.onclick = () => {
+      const blob = new Blob([data.cleanedTranscript], { type: 'text/plain;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${data.name || 'transcript'}.txt`;
+      a.click();
+      URL.revokeObjectURL(url);
+    };
+  } else {
+    transcriptTextEl.textContent = '';
+    downloadTranscriptBtn.hidden = true;
+  }
+}
+
+async function pollTranscriptStatus() {
+  if (!currentSession) return;
+  try {
+    const data = await hostFetchJson(`/api/sessions/${currentSession.id}/transcript`);
+    renderTranscriptStatus(data);
+    if (data.processingStatus !== 'ready' && data.processingStatus !== 'failed') {
+      transcriptPollTimer = setTimeout(pollTranscriptStatus, TRANSCRIPT_POLL_MS);
+    }
+  } catch (err) {
+    console.error('Transcript status fetch failed:', err);
+    transcriptStatusEl.textContent = `查詢失敗：${err.message}`;
+    transcriptPollTimer = setTimeout(pollTranscriptStatus, TRANSCRIPT_POLL_MS);
+  }
+}
+
+function startTranscriptPolling() {
+  clearTimeout(transcriptPollTimer);
+  transcriptSectionEl.hidden = false;
+  transcriptStatusEl.textContent = '準備中…';
+  pollTranscriptStatus();
+}
+
+retryTranscriptBtn.addEventListener('click', async () => {
+  if (!currentSession) return;
+  retryTranscriptBtn.disabled = true;
+  try {
+    await hostFetchJson(`/api/sessions/${currentSession.id}/transcript/retry`, { method: 'POST' });
+    startTranscriptPolling();
+  } catch (err) {
+    console.error('Retry failed:', err);
+    transcriptStatusEl.textContent = `重試失敗：${err.message}`;
+  } finally {
+    retryTranscriptBtn.disabled = false;
+  }
+});
 
 // A failure here (bad password entered twice, server briefly unreachable,
 // etc.) must NOT silently kill the rest of this module — as a top-level
@@ -654,4 +774,5 @@ endSessionBtn.addEventListener('click', async () => {
   clearBtn.disabled = true;
   endSessionBtn.disabled = true;
   statusEl.textContent = 'session ended';
+  startTranscriptPolling();
 });

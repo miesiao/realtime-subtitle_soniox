@@ -7,6 +7,16 @@ import { fileURLToPath } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
 import { SonioxNodeClient } from '@soniox/node';
 import QRCode from 'qrcode';
+import {
+  runMigrations,
+  dbInsertSession,
+  dbMarkSessionLive,
+  dbMarkSessionEnded,
+  dbRenameSession,
+  dbInsertTranscriptLine,
+  dbGetSessionTranscript,
+} from './db.js';
+import { runTranscriptCleanup } from './transcript-cleanup.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 8787;
@@ -40,6 +50,40 @@ function isValidHostSecret(provided) {
   const providedBuf = Buffer.from(typeof provided === 'string' ? provided : '');
   if (expectedBuf.length !== providedBuf.length) return false;
   return crypto.timingSafeEqual(expectedBuf, providedBuf);
+}
+
+// Shared gate for every host-only endpoint (temporary-key, session create,
+// rename, transcript read/retry). Writes the error response itself and
+// returns false on failure so callers can just `if (!authorizeHost(...)) return;`.
+function authorizeHost(req, res) {
+  if (!process.env.HOST_SECRET) {
+    console.error('HOST_SECRET is not set — refusing host-only request. Set HOST_SECRET in .env before going live.');
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Server misconfigured: HOST_SECRET not set' }));
+    return false;
+  }
+  if (!isValidHostSecret(req.headers['x-host-secret'])) {
+    res.writeHead(401, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Unauthorized' }));
+    return false;
+  }
+  return true;
+}
+
+function readJsonBody(req) {
+  return new Promise((resolve, reject) => {
+    let raw = '';
+    req.on('data', (chunk) => {
+      raw += chunk;
+      if (raw.length > 1_000_000) req.destroy(new Error('Body too large'));
+    });
+    req.on('end', () => {
+      if (!raw) { resolve({}); return; }
+      try { resolve(JSON.parse(raw)); }
+      catch (err) { reject(err); }
+    });
+    req.on('error', reject);
+  });
 }
 
 function serveFile(res, filePath) {
@@ -102,6 +146,7 @@ function createSession() {
   const session = {
     id,
     joinCode,
+    name: null,
     status: 'created',
     hostWs: null,
     viewers: new Set(),
@@ -110,6 +155,12 @@ function createSession() {
     createdAt: Date.now(),
     startedAt: null,
     endedAt: null,
+    // Fire-and-forget TranscriptLine INSERT promises still in flight (see
+    // pushUtterance). Never awaited on the broadcast path — only drained by
+    // host_end_session before it reads the transcript back for batch
+    // cleanup, so a session that ends moments after its last utterance can't
+    // lose that line to the read winning the race against its own insert.
+    pendingInserts: new Set(),
   };
   sessions.set(id, session);
   sessionsByJoinCode.set(joinCode, id);
@@ -147,17 +198,7 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
 
   if (req.method === 'POST' && url.pathname === '/api/temporary-key') {
-    if (!process.env.HOST_SECRET) {
-      console.error('HOST_SECRET is not set — refusing to issue Soniox temporary keys. Set HOST_SECRET in .env before going live.');
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Server misconfigured: HOST_SECRET not set' }));
-      return;
-    }
-    if (!isValidHostSecret(req.headers['x-host-secret'])) {
-      res.writeHead(401, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Unauthorized' }));
-      return;
-    }
+    if (!authorizeHost(req, res)) return;
     try {
       // usage_type must be "transcribe_websocket" for real-time STT (per @soniox/node types).
       const { api_key, expires_at } = await soniox.auth.createTemporaryKey({
@@ -179,18 +220,18 @@ const server = http.createServer(async (req, res) => {
   // endpoint — no accounts yet (that's phase 3), so this shared secret is
   // the only thing stopping a stranger from spinning up sessions for free.
   if (req.method === 'POST' && url.pathname === '/api/sessions') {
-    if (!process.env.HOST_SECRET) {
-      console.error('HOST_SECRET is not set — refusing to create sessions. Set HOST_SECRET in .env before going live.');
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Server misconfigured: HOST_SECRET not set' }));
-      return;
-    }
-    if (!isValidHostSecret(req.headers['x-host-secret'])) {
-      res.writeHead(401, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Unauthorized' }));
-      return;
-    }
+    if (!authorizeHost(req, res)) return;
     const session = createSession();
+    // DB is the source of truth for session metadata (SPEC §6.5); this is an
+    // infrequent, one-off write (not the per-utterance hot path), so it's
+    // fine to await it here. A DB outage must not stop hosts from starting
+    // a session though — log and keep going, the in-memory object still works
+    // for the live broadcast the rest of this request/session relies on.
+    try {
+      await dbInsertSession({ id: session.id, joinCode: session.joinCode, name: session.name });
+    } catch (err) {
+      console.error(`[db] failed to insert session ${session.id}:`, err);
+    }
     const viewerUrl = `${getOrigin(req)}/viewer2?code=${session.joinCode}`;
     let qrDataUrl = null;
     try {
@@ -199,8 +240,120 @@ const server = http.createServer(async (req, res) => {
       console.error('QR code generation failed:', err);
     }
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ id: session.id, joinCode: session.joinCode, viewerUrl, qrDataUrl }));
+    res.end(JSON.stringify({ id: session.id, joinCode: session.joinCode, name: session.name, viewerUrl, qrDataUrl }));
     return;
+  }
+
+  // Host-only rename (SPEC §6.5 point 6): "host 開場當下能改這一場的名字."
+  // No accounts yet, so ownership is enforced the same way session creation
+  // is — the shared host secret, not a per-user check.
+  {
+    const renameMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/name$/);
+    if (req.method === 'PATCH' && renameMatch) {
+      if (!authorizeHost(req, res)) return;
+      const id = renameMatch[1];
+      let body;
+      try {
+        body = await readJsonBody(req);
+      } catch (err) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid JSON body' }));
+        return;
+      }
+      const name = typeof body.name === 'string' ? body.name.trim() : '';
+      if (!name) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'name is required' }));
+        return;
+      }
+      const session = sessions.get(id);
+      if (session) session.name = name;
+      let found = Boolean(session);
+      try {
+        found = (await dbRenameSession(id, name)) || found;
+      } catch (err) {
+        console.error(`[db] failed to rename session ${id}:`, err);
+      }
+      if (!found) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'session_not_found' }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ id, name }));
+      return;
+    }
+  }
+
+  // Minimal single-session result view (SPEC §6.5 point 5) — NOT the "my
+  // sessions" list page, that's phase 3. Host polls this after ending a
+  // session to see processing / ready / failed and read/download the
+  // cleaned transcript once it's ready.
+  {
+    const transcriptMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/transcript$/);
+    if (req.method === 'GET' && transcriptMatch) {
+      if (!authorizeHost(req, res)) return;
+      const id = transcriptMatch[1];
+      let row;
+      try {
+        row = await dbGetSessionTranscript(id);
+      } catch (err) {
+        console.error(`[db] failed to read transcript for session ${id}:`, err);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Failed to read transcript' }));
+        return;
+      }
+      if (!row) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'session_not_found' }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        id: row.id,
+        name: row.name,
+        status: row.status,
+        processingStatus: row.processing_status,
+        cleanedTranscript: row.cleaned_transcript,
+      }));
+      return;
+    }
+  }
+
+  // Manual retry (SPEC §6.5: "不要讓一次 API 失敗就永久卡死") — re-runs the
+  // same batch cleanup function used on `ended`. Fire-and-forget: this is a
+  // slow Claude call, the host polls GET .../transcript for the result.
+  {
+    const retryMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/transcript\/retry$/);
+    if (req.method === 'POST' && retryMatch) {
+      if (!authorizeHost(req, res)) return;
+      const id = retryMatch[1];
+      let row;
+      try {
+        row = await dbGetSessionTranscript(id);
+      } catch (err) {
+        console.error(`[db] failed to read session ${id} for retry:`, err);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Failed to read session' }));
+        return;
+      }
+      if (!row) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'session_not_found' }));
+        return;
+      }
+      if (row.status !== 'ended') {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'session_not_ended' }));
+        return;
+      }
+      runTranscriptCleanup(id).catch((err) => {
+        console.error(`[transcript-cleanup] retry for session ${id} threw unexpectedly:`, err);
+      });
+      res.writeHead(202, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ id, processingStatus: 'processing' }));
+      return;
+    }
   }
 
   if (url.pathname === '/vendor/soniox-client.mjs') {
@@ -278,6 +431,17 @@ function pushUtterance(session, { original, translations }) {
   session.history.push(utterance);
   if (session.history.length > HISTORY_MAX) session.history.shift();
   broadcastToViewers(session, utterance);
+
+  // Persistence never gates the broadcast above — this fires after viewers
+  // already have the utterance, and a DB hiccup here only gets logged, never
+  // surfaced to host/viewers (SPEC §6.5: "不可等散場", "廣播絕不等待 DB").
+  // Tracked in pendingInserts so host_end_session can drain it before the
+  // batch cleanup reads the transcript back — see the field comment above.
+  const insertPromise = dbInsertTranscriptLine(session.id, utterance.id, utterance.ts, utterance.original).catch((err) => {
+    console.error(`[db] failed to insert transcript line session=${session.id} seq=${utterance.id}:`, err);
+  });
+  session.pendingInserts.add(insertPromise);
+  insertPromise.finally(() => session.pendingInserts.delete(insertPromise));
 }
 
 const wss = new WebSocketServer({ server });
@@ -347,6 +511,9 @@ wss.on('connection', (ws) => {
         session.startedAt = Date.now();
         console.log(`[session ${session.id}] live`);
         broadcastToViewers(session, { type: 'session_status', status: 'live' });
+        dbMarkSessionLive(session.id).catch((err) => {
+          console.error(`[db] failed to mark session ${session.id} live:`, err);
+        });
       }
       return;
     }
@@ -362,6 +529,22 @@ wss.on('connection', (ws) => {
         broadcastToViewers(session, { type: 'session_status', status: 'ended' });
         session.viewers.clear();
         session.hostWs = null;
+
+        // Batch pipeline (SPEC §6.5/§6): fully decoupled from the realtime
+        // path above — this UPDATE + the Claude cleanup call run in the
+        // background and never block a viewer or the WS handler. Draining
+        // pendingInserts first closes the race where a line from the very
+        // last utterance is still mid-flight when cleanup reads the
+        // transcript back (see pushUtterance/pendingInserts).
+        (async () => {
+          await Promise.allSettled(session.pendingInserts);
+          try {
+            await dbMarkSessionEnded(session.id);
+          } catch (err) {
+            console.error(`[db] failed to mark session ${session.id} ended:`, err);
+          }
+          await runTranscriptCleanup(session.id);
+        })();
       }
       return;
     }
@@ -450,6 +633,11 @@ const heartbeatTimer = setInterval(() => {
 }, HEARTBEAT_INTERVAL);
 
 wss.on('close', () => clearInterval(heartbeatTimer));
+
+// Runs schema.sql (idempotent) before accepting requests. A failure here is
+// logged loudly but does not stop the server — live captioning has no DB
+// dependency (see db.js) and must keep working even with Postgres down.
+await runMigrations();
 
 server.listen(PORT, () => {
   console.log(`Soniox test server running at http://localhost:${PORT}`);

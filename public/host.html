@@ -19,10 +19,28 @@
       <span>場次代碼 join code：<code id="joinCode">…</code></span>
       <a id="viewerLink" href="#" target="_blank" rel="noopener">開啟觀眾頁 ↗</a>
     </div>
+    <div class="session-info-row">
+      <label for="sessionNameInput">場次名稱</label>
+      <input id="sessionNameInput" type="text" placeholder="（未命名）" />
+      <button id="renameBtn" type="button">改名</button>
+      <span id="renameStatus" class="status"></span>
+    </div>
     <img id="qrImg" alt="掃碼加入觀眾頁" hidden />
     <div id="sessionError" class="session-error" hidden>
       <span id="sessionErrorText"></span>
       <button id="retrySessionBtn" type="button">重試</button>
+    </div>
+  </section>
+
+  <section id="transcriptSection" class="pane" style="margin-top:16px;" hidden>
+    <div class="pane-header">
+      <span>散場整理</span>
+      <span id="transcriptStatus" class="script-badge"></span>
+    </div>
+    <div class="pane-body" style="min-height:60px; font-size:14px;">
+      <button id="retryTranscriptBtn" type="button" hidden>重新整理</button>
+      <button id="downloadTranscriptBtn" type="button" hidden>下載逐字稿 (.txt)</button>
+      <pre id="transcriptText" style="white-space:pre-wrap; margin-top:8px;"></pre>
     </div>
   </section>
 
