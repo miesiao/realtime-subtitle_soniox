@@ -143,6 +143,33 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 .lang-es { color: #51cf66; }
 .lang-other { color: #adb5bd; }
 
+.landing-body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  text-align: center;
+  padding: 24px;
+}
+.landing-hero { max-width: 480px; }
+.landing-title { font-size: 40px; margin: 0 0 12px; letter-spacing: 0.02em; }
+.landing-tagline { font-size: 15px; color: #aaa; line-height: 1.6; margin: 0 0 28px; }
+.landing-cta { margin-bottom: 24px; }
+.landing-btn {
+  display: inline-block;
+  font-size: 16px;
+  font-weight: 600;
+  color: #0f1115;
+  background: #4dabf7;
+  padding: 12px 28px;
+  border-radius: 8px;
+  text-decoration: none;
+  transition: opacity 0.15s;
+}
+.landing-btn:hover { opacity: 0.85; }
+.landing-footnote { font-size: 12px; }
+.landing-footnote a { color: #666; }
+
 .session-list { display: flex; flex-direction: column; gap: 10px; }
 .session-row {
   border: 1px solid #262b36;

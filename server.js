@@ -520,6 +520,14 @@ app.get('/auth/logout', (req, res, next) => {
 app.get('/vendor/soniox-client.mjs', (req, res) => serveFile(res, VENDOR_CLIENT_SDK));
 app.get('/vendor/opencc-cn2t.mjs', (req, res) => serveFile(res, VENDOR_OPENCC));
 
+// Public marketing landing page ("隨時有字幕") — the actual entry point now.
+// It carries its own "登入 / 註冊" button straight to /auth/google, so a
+// signed-out visitor no longer has to bounce through /host first to find
+// login. The old single-page Soniox test page moved to /single (no route
+// change to that page itself — still index.html).
+app.get('/', (req, res) => serveFile(res, path.join(PUBLIC_DIR, 'landing.html')));
+app.get('/single', (req, res) => serveFile(res, path.join(PUBLIC_DIR, 'index.html')));
+
 // Login-gated pages (SPEC §3a points 3/5): a signed-out visitor is bounced
 // to Google and back rather than seeing a page that can't do anything.
 app.get('/host', requireLoginPage, (req, res) => serveFile(res, path.join(PUBLIC_DIR, 'host.html')));
@@ -529,7 +537,9 @@ app.get('/sessions', requireLoginPage, (req, res) => serveFile(res, path.join(PU
 app.get('/viewer', (req, res) => serveFile(res, path.join(PUBLIC_DIR, 'viewer.html')));
 app.get('/viewer2', (req, res) => serveFile(res, path.join(PUBLIC_DIR, 'viewer2.html')));
 
-app.use(express.static(PUBLIC_DIR));
+// index:false — otherwise express.static would keep auto-serving index.html
+// for GET / and silently shadow the landing page route above.
+app.use(express.static(PUBLIC_DIR, { index: false }));
 
 const server = http.createServer(app);
 
