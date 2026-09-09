@@ -97,6 +97,38 @@ if (!process.env.SESSION_SECRET) {
 }
 const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
 
+// Application-layer authorization on top of OAuth (this does NOT touch the
+// OAuth/session verification itself — Google having authenticated someone
+// only proves *who* they are, not that they're allowed to use this app as a
+// host). Checked in the verify callback below, after Google's profile comes
+// back but before any DB write.
+//
+// Fail-closed by design: an empty/missing LOGIN_ALLOWLIST blocks everyone
+// rather than admitting everyone. A silently-empty allowlist is the failure
+// mode that matters most to avoid here — it would mean this gate went
+// missing without anyone noticing (env var typo'd, not set on a new
+// deploy, etc.) and quietly reverted to "anyone with a Google account is a
+// host," which is exactly the hole this feature closes.
+function parseAllowlist(raw) {
+  if (!raw) return new Set();
+  return new Set(
+    raw.split(',')
+      .map((entry) => entry.trim().toLowerCase())
+      .filter(Boolean)
+  );
+}
+const LOGIN_ALLOWLIST = parseAllowlist(process.env.LOGIN_ALLOWLIST);
+if (LOGIN_ALLOWLIST.size === 0) {
+  console.error(
+    'LOGIN_ALLOWLIST 未設定或為空 — 目前所有 Google 登入都會被拒絕。' +
+    '請在環境變數設定 LOGIN_ALLOWLIST（逗號分隔的 email 清單）以允許特定帳號登入本服務。'
+  );
+}
+function isEmailAllowed(email) {
+  if (!email) return false;
+  return LOGIN_ALLOWLIST.has(String(email).trim().toLowerCase());
+}
+
 const GOOGLE_LOGIN_CONFIGURED = Boolean(process.env.GOOGLE_LOGIN_CLIENT_ID && process.env.GOOGLE_LOGIN_CLIENT_SECRET);
 if (!GOOGLE_LOGIN_CONFIGURED) {
   console.error(
@@ -114,6 +146,15 @@ if (!GOOGLE_LOGIN_CONFIGURED) {
     async (accessToken, refreshToken, profile, done) => {
       try {
         const email = (profile.emails && profile.emails[0] && profile.emails[0].value) || null;
+        // Allowlist check happens here — after Google has verified who this
+        // person is, before we ever touch the DB. Rejected: done(null,
+        // false, info) so Passport treats it as a failed login, no
+        // dbUpsertUserByGoogleSub call, no row written, no session created.
+        if (!isEmailAllowed(email)) {
+          console.warn(`[auth] rejected login: ${email || '(no email in Google profile)'} is not in LOGIN_ALLOWLIST`);
+          done(null, false, { reason: 'not_allowlisted', email });
+          return;
+        }
         const name = profile.displayName || null;
         const user = await dbUpsertUserByGoogleSub({
           id: crypto.randomUUID(),
@@ -502,13 +543,28 @@ app.get('/auth/google/callback', (req, res, next) => {
     return;
   }
   next();
-}, passport.authenticate('google', { failureRedirect: '/host?login=failed' }),
-  (req, res) => {
-    const returnTo = sanitizeReturnTo(req.session.returnTo);
-    delete req.session.returnTo;
-    res.redirect(returnTo);
-  }
-);
+}, (req, res, next) => {
+  // Custom callback form (rather than the { failureRedirect } shorthand) so
+  // we can tell "not on the allowlist" apart from any other OAuth failure
+  // and send each to a message that actually explains what happened — see
+  // the verify callback's done(null, false, { reason, email }) above.
+  passport.authenticate('google', (err, user, info) => {
+    if (err) { next(err); return; }
+    if (!user) {
+      const reason = (info && info.reason) || 'oauth_failed';
+      const params = new URLSearchParams({ reason });
+      if (info && info.email) params.set('email', info.email);
+      res.redirect(`/login-failed?${params.toString()}`);
+      return;
+    }
+    req.logIn(user, (loginErr) => {
+      if (loginErr) { next(loginErr); return; }
+      const returnTo = sanitizeReturnTo(req.session.returnTo);
+      delete req.session.returnTo;
+      res.redirect(returnTo);
+    });
+  })(req, res, next);
+});
 
 app.get('/auth/logout', (req, res, next) => {
   req.logout((err) => {
@@ -527,6 +583,11 @@ app.get('/vendor/opencc-cn2t.mjs', (req, res) => serveFile(res, VENDOR_OPENCC));
 // change to that page itself — still index.html).
 app.get('/', (req, res) => serveFile(res, path.join(PUBLIC_DIR, 'landing.html')));
 app.get('/single', (req, res) => serveFile(res, path.join(PUBLIC_DIR, 'index.html')));
+
+// Landing spot for a rejected /auth/google/callback (allowlist miss or any
+// other OAuth failure) — public, no login, explains what happened instead
+// of a bare "login=failed" query string on /host.
+app.get('/login-failed', (req, res) => serveFile(res, path.join(PUBLIC_DIR, 'login-failed.html')));
 
 // Login-gated pages (SPEC §3a points 3/5): a signed-out visitor is bounced
 // to Google and back rather than seeing a page that can't do anything.
