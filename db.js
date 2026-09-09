@@ -68,14 +68,40 @@ function dbReady() {
   return Boolean(pool && migrated);
 }
 
+// --- users --------------------------------------------------------------
+
+// Google is the only identity source (SPEC §3a): look up by google_sub, and
+// upsert on every login so a changed Google display name/email stays fresh.
+export async function dbUpsertUserByGoogleSub({ id, googleSub, email, name }) {
+  if (!dbReady()) throw new Error('Database not available');
+  const result = await pool.query(
+    `INSERT INTO users (id, google_sub, email, name)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (google_sub) DO UPDATE SET email = $3, name = $4
+     RETURNING id, google_sub, email, name, created_at`,
+    [id, googleSub, email || null, name || null]
+  );
+  return result.rows[0];
+}
+
+// Used by passport's deserializeUser — session cookie only stores the id.
+export async function dbGetUserById(id) {
+  if (!dbReady()) return null;
+  const result = await pool.query(
+    `SELECT id, google_sub, email, name, created_at FROM users WHERE id = $1`,
+    [id]
+  );
+  return result.rows[0] || null;
+}
+
 // --- sessions ---------------------------------------------------------
 
-export async function dbInsertSession({ id, joinCode, name, sourceLang, targetLangs }) {
+export async function dbInsertSession({ id, joinCode, name, sourceLang, targetLangs, userId }) {
   if (!dbReady()) return;
   await pool.query(
-    `INSERT INTO sessions (id, join_code, name, status, source_lang, target_langs)
-     VALUES ($1, $2, $3, 'created', $4, $5)`,
-    [id, joinCode, name || null, sourceLang || null, targetLangs || null]
+    `INSERT INTO sessions (id, join_code, name, status, source_lang, target_langs, user_id)
+     VALUES ($1, $2, $3, 'created', $4, $5, $6)`,
+    [id, joinCode, name || null, sourceLang || null, targetLangs || null, userId || null]
   );
 }
 
@@ -131,6 +157,29 @@ export async function dbGetSessionTranscript(id) {
     [id]
   );
   return result.rows[0] || null;
+}
+
+// Ownership check (SPEC §3a point 6): every "view this session's transcript
+// / rename this session" endpoint calls this first and compares user_id to
+// the logged-in user before doing anything else. A pre-phase-3a session has
+// user_id = null, which never equals a real user id — it just becomes
+// inaccessible through these endpoints rather than crashing anything.
+export async function dbGetSessionOwner(id) {
+  if (!dbReady()) return null;
+  const result = await pool.query(`SELECT id, user_id FROM sessions WHERE id = $1`, [id]);
+  return result.rows[0] || null;
+}
+
+// "My sessions" list (SPEC §3a point 5) — name, status, created_at, and
+// processing_status for every session this user owns, newest first.
+export async function dbGetSessionsByUser(userId) {
+  if (!dbReady()) return [];
+  const result = await pool.query(
+    `SELECT id, name, status, processing_status, created_at, started_at, ended_at
+     FROM sessions WHERE user_id = $1 ORDER BY created_at DESC`,
+    [userId]
+  );
+  return result.rows;
 }
 
 // --- transcript_lines ---------------------------------------------------

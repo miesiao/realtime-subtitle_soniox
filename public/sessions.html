@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8" />
+<title>我的場次 — 即時字幕</title>
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header>
+    <h1>我的場次</h1>
+    <div class="model-info">登入身分決定看得到哪些場次；只有你自己開的場次會出現在這裡。</div>
+  </header>
+
+  <section class="session-info">
+    <div class="session-info-row">
+      <span id="whoAmI">登入狀態確認中…</span>
+      <a href="/host">開新場次 ↗</a>
+      <a href="/auth/logout">登出</a>
+    </div>
+  </section>
+
+  <section id="listSection" class="pane" style="margin-top:16px;">
+    <div class="pane-header">
+      <span>場次清單</span>
+      <button id="refreshBtn" type="button">重新整理清單</button>
+    </div>
+    <div id="listBody" class="pane-body session-list">
+      <div id="listStatus" class="status">載入中…</div>
+    </div>
+  </section>
+
+  <template id="sessionRowTemplate">
+    <div class="session-row">
+      <div class="session-row-main">
+        <input class="session-name-input" type="text" />
+        <button class="renameBtn" type="button">改名</button>
+        <span class="renameStatus status"></span>
+      </div>
+      <div class="session-row-meta">
+        <span class="statusBadge script-badge"></span>
+        <span class="processingBadge script-badge"></span>
+        <span class="createdAt status"></span>
+      </div>
+      <div class="session-row-transcript" hidden>
+        <button class="downloadBtn" type="button" hidden>下載逐字稿 (.txt)</button>
+        <button class="retryBtn" type="button" hidden>重新整理</button>
+        <pre class="transcriptText"></pre>
+      </div>
+    </div>
+  </template>
+
+  <script type="module" src="/sessions.js"></script>
+</body>
+</html>

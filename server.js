@@ -4,10 +4,16 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import express from 'express';
+import session from 'express-session';
+import connectPgSimple from 'connect-pg-simple';
+import passport from 'passport';
+import { Strategy as GoogleStrategy } from 'passport-google-oauth20';
 import { WebSocketServer, WebSocket } from 'ws';
 import { SonioxNodeClient } from '@soniox/node';
 import QRCode from 'qrcode';
 import {
+  pool,
   runMigrations,
   dbInsertSession,
   dbMarkSessionLive,
@@ -15,6 +21,10 @@ import {
   dbRenameSession,
   dbInsertTranscriptLine,
   dbGetSessionTranscript,
+  dbUpsertUserByGoogleSub,
+  dbGetUserById,
+  dbGetSessionOwner,
+  dbGetSessionsByUser,
 } from './db.js';
 import { runTranscriptCleanup } from './transcript-cleanup.js';
 
@@ -41,8 +51,11 @@ const MIME_TYPES = {
 };
 
 // Guards the one endpoint that actually costs money (Soniox temporary key
-// issuance). Everything else — viewer pages, the WebSocket relay — stays
-// open. Fixed-time comparison so a wrong guess can't be narrowed down by
+// issuance). Session creation/rename/transcript moved to login-based
+// ownership in phase 3a (see requireLoginApi/requireLoginPage below) — this
+// shared-secret gate is kept only for /api/temporary-key, deliberately not
+// torn out yet (SPEC §3a point 4: "避免 auth 真空", pull it only when told
+// to). Fixed-time comparison so a wrong guess can't be narrowed down by
 // measuring how long the check took.
 function isValidHostSecret(provided) {
   const expected = process.env.HOST_SECRET;
@@ -52,9 +65,9 @@ function isValidHostSecret(provided) {
   return crypto.timingSafeEqual(expectedBuf, providedBuf);
 }
 
-// Shared gate for every host-only endpoint (temporary-key, session create,
-// rename, transcript read/retry). Writes the error response itself and
-// returns false on failure so callers can just `if (!authorizeHost(...)) return;`.
+// Gate for /api/temporary-key only (see comment above). Writes the error
+// response itself and returns false on failure so the caller can just
+// `if (!authorizeHost(...)) return;`.
 function authorizeHost(req, res) {
   if (!process.env.HOST_SECRET) {
     console.error('HOST_SECRET is not set — refusing host-only request. Set HOST_SECRET in .env before going live.');
@@ -70,20 +83,88 @@ function authorizeHost(req, res) {
   return true;
 }
 
-function readJsonBody(req) {
-  return new Promise((resolve, reject) => {
-    let raw = '';
-    req.on('data', (chunk) => {
-      raw += chunk;
-      if (raw.length > 1_000_000) req.destroy(new Error('Body too large'));
-    });
-    req.on('end', () => {
-      if (!raw) { resolve({}); return; }
-      try { resolve(JSON.parse(raw)); }
-      catch (err) { reject(err); }
-    });
-    req.on('error', reject);
-  });
+// ---------------------------------------------------------------------------
+// Google login (SPEC §3a) — Passport + express-session, no external hosted
+// auth service. Identity is decided entirely server-side: the session cookie
+// is httpOnly, so client-side code never sees (and can't spoof) who's logged
+// in, only the /api/me response tells it.
+// ---------------------------------------------------------------------------
+if (!process.env.SESSION_SECRET) {
+  console.error(
+    'Missing SESSION_SECRET — using a random value generated at boot. Logins ' +
+    'will not survive a server restart until you set SESSION_SECRET in .env.'
+  );
+}
+const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
+
+const GOOGLE_LOGIN_CONFIGURED = Boolean(process.env.GOOGLE_LOGIN_CLIENT_ID && process.env.GOOGLE_LOGIN_CLIENT_SECRET);
+if (!GOOGLE_LOGIN_CONFIGURED) {
+  console.error(
+    'Missing GOOGLE_LOGIN_CLIENT_ID / GOOGLE_LOGIN_CLIENT_SECRET — Google login is ' +
+    'disabled. Set both in .env (same values as the Railway env) to enable it.'
+  );
+} else {
+  passport.use(new GoogleStrategy(
+    {
+      clientID: process.env.GOOGLE_LOGIN_CLIENT_ID,
+      clientSecret: process.env.GOOGLE_LOGIN_CLIENT_SECRET,
+      callbackURL: '/auth/google/callback',
+      proxy: true, // resolve the relative callbackURL using X-Forwarded-* (Railway terminates TLS upstream)
+    },
+    async (accessToken, refreshToken, profile, done) => {
+      try {
+        const email = (profile.emails && profile.emails[0] && profile.emails[0].value) || null;
+        const name = profile.displayName || null;
+        const user = await dbUpsertUserByGoogleSub({
+          id: crypto.randomUUID(),
+          googleSub: profile.id,
+          email,
+          name,
+        });
+        done(null, user);
+      } catch (err) {
+        done(err);
+      }
+    }
+  ));
+}
+
+passport.serializeUser((user, done) => done(null, user.id));
+passport.deserializeUser(async (id, done) => {
+  try {
+    const user = await dbGetUserById(id);
+    done(null, user || false);
+  } catch (err) {
+    done(err);
+  }
+});
+
+// requireLoginApi: for JSON endpoints — 401 body, never a redirect (SPEC §3a
+// point 3: "未登入回 401").
+function requireLoginApi(req, res, next) {
+  if (!req.isAuthenticated()) {
+    res.status(401).json({ error: 'login_required' });
+    return;
+  }
+  next();
+}
+
+// requireLoginPage: for full-page routes (/host, /sessions) — bounce
+// straight to Google login and back, so a signed-out visitor never sees a
+// half-working page. Only ever redirects to a same-origin relative path
+// (never trusts an absolute/`//`-prefixed returnTo — that would be an open
+// redirect).
+function requireLoginPage(req, res, next) {
+  if (!req.isAuthenticated()) {
+    const returnTo = encodeURIComponent(req.originalUrl);
+    res.redirect(`/auth/google?returnTo=${returnTo}`);
+    return;
+  }
+  next();
+}
+
+function sanitizeReturnTo(value) {
+  return typeof value === 'string' && value.startsWith('/') && !value.startsWith('//') ? value : '/host';
 }
 
 function serveFile(res, filePath) {
@@ -194,201 +275,263 @@ function getOrigin(req) {
   return `${proto}://${req.headers.host}`;
 }
 
-const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url, `http://${req.headers.host}`);
+// Railway terminates TLS upstream and forwards plain HTTP with
+// X-Forwarded-Proto — without trust proxy, Express never considers the
+// request secure, and express-session's cookie.secure would silently refuse
+// to set the cookie in production.
+const app = express();
+app.set('trust proxy', 1);
 
-  if (req.method === 'POST' && url.pathname === '/api/temporary-key') {
-    if (!authorizeHost(req, res)) return;
-    try {
-      // usage_type must be "transcribe_websocket" for real-time STT (per @soniox/node types).
-      const { api_key, expires_at } = await soniox.auth.createTemporaryKey({
-        usage_type: 'transcribe_websocket',
-        expires_in_seconds: 300,
-      });
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ api_key, expires_at }));
-    } catch (err) {
-      console.error('createTemporaryKey failed:', err);
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Failed to create temporary key' }));
-    }
+const PgSessionStore = connectPgSimple(session);
+app.use(session({
+  store: pool ? new PgSessionStore({ pool, tableName: 'user_sessions', createTableIfMissing: true }) : undefined,
+  secret: SESSION_SECRET,
+  resave: false,
+  saveUninitialized: false,
+  cookie: {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
+  },
+}));
+app.use(passport.initialize());
+app.use(passport.session());
+
+app.use(express.json({ limit: '1mb' }));
+// Turns a malformed JSON body into the same shaped error the old
+// readJsonBody() used to produce, instead of express's default HTML error page.
+app.use((err, req, res, next) => {
+  if (err && err.type === 'entity.parse.failed') {
+    res.status(400).json({ error: 'Invalid JSON body' });
     return;
   }
-
-  // Creates a new session (SPEC §2/§4): generates the internal id + public
-  // join_code, in status `created`. Gated the same way as the temporary-key
-  // endpoint — no accounts yet (that's phase 3), so this shared secret is
-  // the only thing stopping a stranger from spinning up sessions for free.
-  if (req.method === 'POST' && url.pathname === '/api/sessions') {
-    if (!authorizeHost(req, res)) return;
-    const session = createSession();
-    // DB is the source of truth for session metadata (SPEC §6.5); this is an
-    // infrequent, one-off write (not the per-utterance hot path), so it's
-    // fine to await it here. A DB outage must not stop hosts from starting
-    // a session though — log and keep going, the in-memory object still works
-    // for the live broadcast the rest of this request/session relies on.
-    try {
-      await dbInsertSession({ id: session.id, joinCode: session.joinCode, name: session.name });
-    } catch (err) {
-      console.error(`[db] failed to insert session ${session.id}:`, err);
-    }
-    const viewerUrl = `${getOrigin(req)}/viewer2?code=${session.joinCode}`;
-    let qrDataUrl = null;
-    try {
-      qrDataUrl = await QRCode.toDataURL(viewerUrl, { margin: 1, width: 320 });
-    } catch (err) {
-      console.error('QR code generation failed:', err);
-    }
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ id: session.id, joinCode: session.joinCode, name: session.name, viewerUrl, qrDataUrl }));
-    return;
-  }
-
-  // Host-only rename (SPEC §6.5 point 6): "host 開場當下能改這一場的名字."
-  // No accounts yet, so ownership is enforced the same way session creation
-  // is — the shared host secret, not a per-user check.
-  {
-    const renameMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/name$/);
-    if (req.method === 'PATCH' && renameMatch) {
-      if (!authorizeHost(req, res)) return;
-      const id = renameMatch[1];
-      let body;
-      try {
-        body = await readJsonBody(req);
-      } catch (err) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Invalid JSON body' }));
-        return;
-      }
-      const name = typeof body.name === 'string' ? body.name.trim() : '';
-      if (!name) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'name is required' }));
-        return;
-      }
-      const session = sessions.get(id);
-      if (session) session.name = name;
-      let found = Boolean(session);
-      try {
-        found = (await dbRenameSession(id, name)) || found;
-      } catch (err) {
-        console.error(`[db] failed to rename session ${id}:`, err);
-      }
-      if (!found) {
-        res.writeHead(404, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'session_not_found' }));
-        return;
-      }
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ id, name }));
-      return;
-    }
-  }
-
-  // Minimal single-session result view (SPEC §6.5 point 5) — NOT the "my
-  // sessions" list page, that's phase 3. Host polls this after ending a
-  // session to see processing / ready / failed and read/download the
-  // cleaned transcript once it's ready.
-  {
-    const transcriptMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/transcript$/);
-    if (req.method === 'GET' && transcriptMatch) {
-      if (!authorizeHost(req, res)) return;
-      const id = transcriptMatch[1];
-      let row;
-      try {
-        row = await dbGetSessionTranscript(id);
-      } catch (err) {
-        console.error(`[db] failed to read transcript for session ${id}:`, err);
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Failed to read transcript' }));
-        return;
-      }
-      if (!row) {
-        res.writeHead(404, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'session_not_found' }));
-        return;
-      }
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({
-        id: row.id,
-        name: row.name,
-        status: row.status,
-        processingStatus: row.processing_status,
-        cleanedTranscript: row.cleaned_transcript,
-      }));
-      return;
-    }
-  }
-
-  // Manual retry (SPEC §6.5: "不要讓一次 API 失敗就永久卡死") — re-runs the
-  // same batch cleanup function used on `ended`. Fire-and-forget: this is a
-  // slow Claude call, the host polls GET .../transcript for the result.
-  {
-    const retryMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/transcript\/retry$/);
-    if (req.method === 'POST' && retryMatch) {
-      if (!authorizeHost(req, res)) return;
-      const id = retryMatch[1];
-      let row;
-      try {
-        row = await dbGetSessionTranscript(id);
-      } catch (err) {
-        console.error(`[db] failed to read session ${id} for retry:`, err);
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Failed to read session' }));
-        return;
-      }
-      if (!row) {
-        res.writeHead(404, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'session_not_found' }));
-        return;
-      }
-      if (row.status !== 'ended') {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'session_not_ended' }));
-        return;
-      }
-      runTranscriptCleanup(id).catch((err) => {
-        console.error(`[transcript-cleanup] retry for session ${id} threw unexpectedly:`, err);
-      });
-      res.writeHead(202, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ id, processingStatus: 'processing' }));
-      return;
-    }
-  }
-
-  if (url.pathname === '/vendor/soniox-client.mjs') {
-    serveFile(res, VENDOR_CLIENT_SDK);
-    return;
-  }
-
-  if (url.pathname === '/vendor/opencc-cn2t.mjs') {
-    serveFile(res, VENDOR_OPENCC);
-    return;
-  }
-
-  if (url.pathname === '/host') {
-    serveFile(res, path.join(PUBLIC_DIR, 'host.html'));
-    return;
-  }
-
-  if (url.pathname === '/viewer') {
-    serveFile(res, path.join(PUBLIC_DIR, 'viewer.html'));
-    return;
-  }
-
-  if (url.pathname === '/viewer2') {
-    serveFile(res, path.join(PUBLIC_DIR, 'viewer2.html'));
-    return;
-  }
-
-  const requestedPath = path.join(PUBLIC_DIR, url.pathname === '/' ? 'index.html' : url.pathname);
-  if (!requestedPath.startsWith(PUBLIC_DIR)) {
-    res.writeHead(403);
-    res.end('Forbidden');
-    return;
-  }
-  serveFile(res, requestedPath);
+  next(err);
 });
+
+app.post('/api/temporary-key', async (req, res) => {
+  if (!authorizeHost(req, res)) return;
+  try {
+    // usage_type must be "transcribe_websocket" for real-time STT (per @soniox/node types).
+    const { api_key, expires_at } = await soniox.auth.createTemporaryKey({
+      usage_type: 'transcribe_websocket',
+      expires_in_seconds: 300,
+    });
+    res.status(200).json({ api_key, expires_at });
+  } catch (err) {
+    console.error('createTemporaryKey failed:', err);
+    res.status(500).json({ error: 'Failed to create temporary key' });
+  }
+});
+
+// Creates a new session (SPEC §2/§4): generates the internal id + public
+// join_code, in status `created`, owned by the logged-in user (SPEC §3a
+// point 3 — this replaces the old shared host-secret gate for this one
+// endpoint; see requireLoginApi/authorizeHost comments above).
+app.post('/api/sessions', requireLoginApi, async (req, res) => {
+  const session = createSession();
+  // DB is the source of truth for session metadata (SPEC §6.5); this is an
+  // infrequent, one-off write (not the per-utterance hot path), so it's
+  // fine to await it here. A DB outage must not stop hosts from starting
+  // a session though — log and keep going, the in-memory object still works
+  // for the live broadcast the rest of this request/session relies on.
+  try {
+    await dbInsertSession({ id: session.id, joinCode: session.joinCode, name: session.name, userId: req.user.id });
+  } catch (err) {
+    console.error(`[db] failed to insert session ${session.id}:`, err);
+  }
+  const viewerUrl = `${getOrigin(req)}/viewer2?code=${session.joinCode}`;
+  let qrDataUrl = null;
+  try {
+    qrDataUrl = await QRCode.toDataURL(viewerUrl, { margin: 1, width: 320 });
+  } catch (err) {
+    console.error('QR code generation failed:', err);
+  }
+  res.status(200).json({ id: session.id, joinCode: session.joinCode, name: session.name, viewerUrl, qrDataUrl });
+});
+
+// "My sessions" list (SPEC §3a point 5) — the page that replaces "host
+// disappeared, transcript gone": whatever DB rows this user owns, regardless
+// of whether the in-memory session object is still alive.
+app.get('/api/sessions', requireLoginApi, async (req, res) => {
+  try {
+    const rows = await dbGetSessionsByUser(req.user.id);
+    res.status(200).json(rows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      status: row.status,
+      processingStatus: row.processing_status,
+      createdAt: row.created_at,
+      startedAt: row.started_at,
+      endedAt: row.ended_at,
+    })));
+  } catch (err) {
+    console.error(`[db] failed to list sessions for user ${req.user.id}:`, err);
+    res.status(500).json({ error: 'Failed to list sessions' });
+  }
+});
+
+// Tells client-side code who (if anyone) is logged in. Identity is decided
+// here, server-side, from the httpOnly session cookie — never trust anything
+// the client claims about itself.
+app.get('/api/me', (req, res) => {
+  if (!req.isAuthenticated()) {
+    res.status(401).json({ error: 'login_required' });
+    return;
+  }
+  res.status(200).json({ id: req.user.id, email: req.user.email, name: req.user.name });
+});
+
+// Ownership check shared by rename/transcript/retry below (SPEC §3a point
+// 6): 404 if the session doesn't exist, 403 if it exists but belongs to
+// someone else (or to nobody — a pre-phase-3a session with user_id null,
+// which can never equal a real logged-in user's id). Writes the response
+// itself on failure, same calling convention as authorizeHost.
+async function authorizeSessionOwner(req, res, id) {
+  let owner;
+  try {
+    owner = await dbGetSessionOwner(id);
+  } catch (err) {
+    console.error(`[db] failed to look up owner of session ${id}:`, err);
+    res.status(500).json({ error: 'Failed to look up session' });
+    return false;
+  }
+  if (!owner) {
+    res.status(404).json({ error: 'session_not_found' });
+    return false;
+  }
+  if (owner.user_id !== req.user.id) {
+    res.status(403).json({ error: 'forbidden' });
+    return false;
+  }
+  return true;
+}
+
+// Rename (SPEC §6.5 point 6 / §3a point 5): now gated by session ownership
+// instead of the shared host secret — only the user who owns this session
+// may rename it.
+app.patch('/api/sessions/:id/name', requireLoginApi, async (req, res) => {
+  const { id } = req.params;
+  if (!(await authorizeSessionOwner(req, res, id))) return;
+  const name = typeof req.body.name === 'string' ? req.body.name.trim() : '';
+  if (!name) {
+    res.status(400).json({ error: 'name is required' });
+    return;
+  }
+  const liveSession = sessions.get(id);
+  if (liveSession) liveSession.name = name;
+  try {
+    await dbRenameSession(id, name);
+  } catch (err) {
+    console.error(`[db] failed to rename session ${id}:`, err);
+    res.status(500).json({ error: 'Failed to rename session' });
+    return;
+  }
+  res.status(200).json({ id, name });
+});
+
+// Single-session result view (SPEC §6.5 point 5 / §3a point 5) — also used
+// by the "my sessions" list page. Ownership-gated: only the owning host can
+// read their own transcript (SPEC §3a point 6 / §6 "只有開播的 host 本人可見").
+app.get('/api/sessions/:id/transcript', requireLoginApi, async (req, res) => {
+  const { id } = req.params;
+  if (!(await authorizeSessionOwner(req, res, id))) return;
+  let row;
+  try {
+    row = await dbGetSessionTranscript(id);
+  } catch (err) {
+    console.error(`[db] failed to read transcript for session ${id}:`, err);
+    res.status(500).json({ error: 'Failed to read transcript' });
+    return;
+  }
+  if (!row) {
+    res.status(404).json({ error: 'session_not_found' });
+    return;
+  }
+  res.status(200).json({
+    id: row.id,
+    name: row.name,
+    status: row.status,
+    processingStatus: row.processing_status,
+    cleanedTranscript: row.cleaned_transcript,
+  });
+});
+
+// Manual retry (SPEC §6.5: "不要讓一次 API 失敗就永久卡死") — re-runs the
+// same batch cleanup function used on `ended`. Fire-and-forget: this is a
+// slow Claude call, the host polls GET .../transcript for the result.
+// Ownership-gated the same way as the endpoints above.
+app.post('/api/sessions/:id/transcript/retry', requireLoginApi, async (req, res) => {
+  const { id } = req.params;
+  if (!(await authorizeSessionOwner(req, res, id))) return;
+  let row;
+  try {
+    row = await dbGetSessionTranscript(id);
+  } catch (err) {
+    console.error(`[db] failed to read session ${id} for retry:`, err);
+    res.status(500).json({ error: 'Failed to read session' });
+    return;
+  }
+  if (!row) {
+    res.status(404).json({ error: 'session_not_found' });
+    return;
+  }
+  if (row.status !== 'ended') {
+    res.status(400).json({ error: 'session_not_ended' });
+    return;
+  }
+  runTranscriptCleanup(id).catch((err) => {
+    console.error(`[transcript-cleanup] retry for session ${id} threw unexpectedly:`, err);
+  });
+  res.status(202).json({ id, processingStatus: 'processing' });
+});
+
+// --- Google login routes (SPEC §3a point 1) --------------------------------
+
+app.get('/auth/google', (req, res, next) => {
+  if (!GOOGLE_LOGIN_CONFIGURED) {
+    res.status(500).json({ error: 'Google login not configured' });
+    return;
+  }
+  req.session.returnTo = sanitizeReturnTo(req.query.returnTo);
+  passport.authenticate('google', { scope: ['profile', 'email'] })(req, res, next);
+});
+
+app.get('/auth/google/callback', (req, res, next) => {
+  if (!GOOGLE_LOGIN_CONFIGURED) {
+    res.status(500).json({ error: 'Google login not configured' });
+    return;
+  }
+  next();
+}, passport.authenticate('google', { failureRedirect: '/host?login=failed' }),
+  (req, res) => {
+    const returnTo = sanitizeReturnTo(req.session.returnTo);
+    delete req.session.returnTo;
+    res.redirect(returnTo);
+  }
+);
+
+app.get('/auth/logout', (req, res, next) => {
+  req.logout((err) => {
+    if (err) { next(err); return; }
+    res.redirect('/');
+  });
+});
+
+app.get('/vendor/soniox-client.mjs', (req, res) => serveFile(res, VENDOR_CLIENT_SDK));
+app.get('/vendor/opencc-cn2t.mjs', (req, res) => serveFile(res, VENDOR_OPENCC));
+
+// Login-gated pages (SPEC §3a points 3/5): a signed-out visitor is bounced
+// to Google and back rather than seeing a page that can't do anything.
+app.get('/host', requireLoginPage, (req, res) => serveFile(res, path.join(PUBLIC_DIR, 'host.html')));
+app.get('/sessions', requireLoginPage, (req, res) => serveFile(res, path.join(PUBLIC_DIR, 'sessions.html')));
+
+// Viewer flow stays completely open — no login, ever (SPEC §3a "不要碰的").
+app.get('/viewer', (req, res) => serveFile(res, path.join(PUBLIC_DIR, 'viewer.html')));
+app.get('/viewer2', (req, res) => serveFile(res, path.join(PUBLIC_DIR, 'viewer2.html')));
+
+app.use(express.static(PUBLIC_DIR));
+
+const server = http.createServer(app);
 
 // ---------------------------------------------------------------------------
 // WebSocket layer: host/viewer roles, §3 unified utterance contract, history

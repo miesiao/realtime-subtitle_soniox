@@ -98,6 +98,39 @@ const transcriptStatusEl = document.getElementById('transcriptStatus');
 const transcriptTextEl = document.getElementById('transcriptText');
 const retryTranscriptBtn = document.getElementById('retryTranscriptBtn');
 const downloadTranscriptBtn = document.getElementById('downloadTranscriptBtn');
+const whoAmIEl = document.getElementById('whoAmI');
+
+// --- Login status (SPEC §3a) ------------------------------------------------
+// This page is server-side login-gated (GET /host redirects to Google if
+// you're signed out), so by the time this script runs there should already
+// be a session cookie — this is just for display, plus a fallback redirect
+// in the unlikely case the cookie expired between page load and this fetch.
+function redirectToLogin() {
+  location.href = `/auth/google?returnTo=${encodeURIComponent(location.pathname)}`;
+}
+
+async function apiFetchJson(url, options = {}) {
+  const res = await fetch(url, { ...options, credentials: 'same-origin' });
+  if (res.status === 401) {
+    redirectToLogin();
+    throw new Error('login_required');
+  }
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Request failed (${res.status})`);
+  }
+  return res.json();
+}
+
+async function loadWhoAmI() {
+  try {
+    const me = await apiFetchJson('/api/me');
+    whoAmIEl.textContent = `登入身分：${me.name || me.email || me.id}`;
+  } catch (err) {
+    if (err.message !== 'login_required') whoAmIEl.textContent = `無法確認登入狀態：${err.message}`;
+  }
+}
+loadWhoAmI();
 
 const LANG_CLASS = { zh: 'lang-zh', en: 'lang-en', es: 'lang-es' };
 function langClass(lang) {
@@ -176,20 +209,15 @@ function connectWs() {
 // link (that's `joinCode`, the capability-based ticket — see §3).
 let currentSession = null; // { id, joinCode, viewerUrl, qrDataUrl }
 
-function requestCreateSession(secret) {
-  return fetch('/api/sessions', {
-    method: 'POST',
-    headers: { 'x-host-secret': secret },
-  });
-}
-
+// Login (not HOST_SECRET) now authorizes creating a session (SPEC §3a point
+// 3) — the cookie goes along automatically on a same-origin fetch. A 401
+// here means the session cookie is gone (e.g. expired mid-visit); bounce
+// back through Google rather than showing a dead-end error.
 async function createSession() {
-  let res = await requestCreateSession(hostSecret);
+  const res = await fetch('/api/sessions', { method: 'POST', credentials: 'same-origin' });
   if (res.status === 401) {
-    clearStoredHostSecret();
-    alert('密碼錯誤，請重新輸入');
-    hostSecret = promptForHostSecret();
-    res = await requestCreateSession(hostSecret);
+    redirectToLogin();
+    throw new Error('login_required');
   }
   if (!res.ok) throw new Error('Failed to create session');
   return res.json();
@@ -206,28 +234,6 @@ function renderSession(session) {
   }
 }
 
-// Generic authenticated JSON fetch for the phase-2 host-only endpoints
-// (rename, transcript status/retry) — same 401-reprompt pattern as
-// requestCreateSession/requestTemporaryKey above.
-async function hostFetchJson(url, options = {}) {
-  const doFetch = (secret) => fetch(url, {
-    ...options,
-    headers: { ...(options.headers || {}), 'x-host-secret': secret },
-  });
-  let res = await doFetch(hostSecret);
-  if (res.status === 401) {
-    clearStoredHostSecret();
-    alert('密碼錯誤，請重新輸入');
-    hostSecret = promptForHostSecret();
-    res = await doFetch(hostSecret);
-  }
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Request failed (${res.status})`);
-  }
-  return res.json();
-}
-
 renameBtn.addEventListener('click', async () => {
   if (!currentSession) return;
   const name = sessionNameInput.value.trim();
@@ -235,7 +241,7 @@ renameBtn.addEventListener('click', async () => {
   renameBtn.disabled = true;
   renameStatusEl.textContent = '改名中…';
   try {
-    const result = await hostFetchJson(`/api/sessions/${currentSession.id}/name`, {
+    const result = await apiFetchJson(`/api/sessions/${currentSession.id}/name`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name }),
@@ -251,8 +257,9 @@ renameBtn.addEventListener('click', async () => {
 });
 
 // --- Post-session transcript status (SPEC §6.5 points 5/6) ------------------
-// Single-session view only — no "my sessions" list, that's phase 3. Starts
-// polling right after host_end_session is sent; keeps polling while
+// This is the live "just ended" view; /sessions is the durable "come back
+// later" list (SPEC §3a point 5) built on the same ownership-gated endpoint.
+// Starts polling right after host_end_session is sent; keeps polling while
 // processing_status is null/'processing', stops once it settles into
 // 'ready' or 'failed'.
 let transcriptPollTimer = null;
@@ -284,7 +291,7 @@ function renderTranscriptStatus(data) {
 async function pollTranscriptStatus() {
   if (!currentSession) return;
   try {
-    const data = await hostFetchJson(`/api/sessions/${currentSession.id}/transcript`);
+    const data = await apiFetchJson(`/api/sessions/${currentSession.id}/transcript`);
     renderTranscriptStatus(data);
     if (data.processingStatus !== 'ready' && data.processingStatus !== 'failed') {
       transcriptPollTimer = setTimeout(pollTranscriptStatus, TRANSCRIPT_POLL_MS);
@@ -307,7 +314,7 @@ retryTranscriptBtn.addEventListener('click', async () => {
   if (!currentSession) return;
   retryTranscriptBtn.disabled = true;
   try {
-    await hostFetchJson(`/api/sessions/${currentSession.id}/transcript/retry`, { method: 'POST' });
+    await apiFetchJson(`/api/sessions/${currentSession.id}/transcript/retry`, { method: 'POST' });
     startTranscriptPolling();
   } catch (err) {
     console.error('Retry failed:', err);

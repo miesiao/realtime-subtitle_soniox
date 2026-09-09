@@ -6,6 +6,17 @@
 -- crypto.randomUUID() already used for in-memory session objects) — never
 -- the public join_code. See SPEC §3.
 
+-- Phase 3a (SPEC §3a): User accounts (Google login) + session ownership.
+-- `id` is generated in JS via crypto.randomUUID(), same pattern as
+-- sessions.id — no dependency on a pgcrypto extension.
+CREATE TABLE IF NOT EXISTS users (
+  id          UUID PRIMARY KEY,
+  google_sub  TEXT UNIQUE NOT NULL,
+  email       TEXT,
+  name        TEXT,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS sessions (
   id                  UUID PRIMARY KEY,
   join_code           TEXT UNIQUE NOT NULL,
@@ -19,6 +30,12 @@ CREATE TABLE IF NOT EXISTS sessions (
   ended_at            TIMESTAMPTZ,
   created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Nullable on purpose: pre-phase-3a sessions have no owner, and must keep
+-- working (no crashes) even though they'll no longer surface in anyone's
+-- "my sessions" list or pass the ownership checks on rename/transcript.
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES users(id);
+CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions (user_id);
 
 CREATE TABLE IF NOT EXISTS transcript_lines (
   id             BIGSERIAL PRIMARY KEY,
