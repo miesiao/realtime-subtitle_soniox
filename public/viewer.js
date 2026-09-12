@@ -44,8 +44,9 @@ function pickTranslation(u) {
 }
 
 // --- Translate on/off (host's 純轉錄模式) -----------------------------------
-// See viewer2.js's identical comment: a pure-transcription host never puts
-// anything in `translations`, so the first utterance's shape is the signal.
+// See viewer2.js's identical comment: decided from the session's own record
+// (targetLangs, relayed in session_status) at join time, not guessed from
+// utterance content.
 let translateMode = null;
 function applyTranslateMode() {
   if (translateMode !== false) return;
@@ -53,9 +54,9 @@ function applyTranslateMode() {
   appEl.classList.remove('hide-original');
   toggleOriginalLabelEl.hidden = true;
 }
-function noteTranslateMode(u) {
-  if (translateMode !== null || !u) return;
-  translateMode = !!(u.translations && Object.keys(u.translations).length);
+function setTranslateMode(targetLangs) {
+  if (translateMode !== null || !Array.isArray(targetLangs)) return;
+  translateMode = targetLangs.length > 0;
   applyTranslateMode();
 }
 
@@ -154,9 +155,8 @@ let loadingMore = false;
 // wholesale each time; no diffing, so a dropped packet self-corrects the
 // instant the next snapshot arrives.
 function applyInterim(u) {
-  noteTranslateMode(u);
   const original = u.original || '';
-  const translationText = pickTranslation(u);
+  const translationText = translateMode === false ? '' : pickTranslation(u);
   if (!original.trim() && !translationText.trim()) return; // nothing to show yet
   const item = ensureLiveItem();
   updateFeedItemContent(item, original, translationText);
@@ -167,12 +167,11 @@ function applyInterim(u) {
 // final somehow arrived with no preceding interim) with the authoritative
 // text, then clear the live slot so the next interim starts a fresh item.
 function applyFinalUtterance(u) {
-  noteTranslateMode(u);
   if (earliestId === null) earliestId = u.id;
   const item = ensureLiveItem();
   item.dataset.id = String(u.id);
   item.className = 'feed-item settled';
-  updateFeedItemContent(item, u.original || '', pickTranslation(u));
+  updateFeedItemContent(item, u.original || '', translateMode === false ? '' : pickTranslation(u));
   liveItemEl = null;
   showPlaceholder();
   scrollFeedToBottom();
@@ -207,9 +206,8 @@ function renderBackfill(utterances) {
   liveItemEl = null;
   placeholderEl = null;
 
-  if (utterances.length) noteTranslateMode(utterances[0]);
   for (const u of utterances) {
-    feedInnerEl.appendChild(createFeedItem(u.original, pickTranslation(u), { live: false, id: u.id }));
+    feedInnerEl.appendChild(createFeedItem(u.original, translateMode === false ? '' : pickTranslation(u), { live: false, id: u.id }));
   }
   showPlaceholder();
 
@@ -236,7 +234,7 @@ function prependHistoryBatch(utterances, hasMore) {
   const prevScrollTop = feedPaneEl.scrollTop;
 
   const frag = document.createDocumentFragment();
-  for (const u of utterances) frag.appendChild(createFeedItem(u.original, pickTranslation(u), { live: false, id: u.id })); // already oldest→newest
+  for (const u of utterances) frag.appendChild(createFeedItem(u.original, translateMode === false ? '' : pickTranslation(u), { live: false, id: u.id })); // already oldest→newest
   feedInnerEl.insertBefore(frag, loadMoreEl.nextSibling);
   // Compensate scroll position so inserting above doesn't jump the view.
   feedPaneEl.scrollTop = prevScrollTop + (feedPaneEl.scrollHeight - prevScrollHeight);
@@ -344,6 +342,7 @@ function connect() {
       return;
     }
     if (msg.type === 'session_status') {
+      setTranslateMode(msg.targetLangs);
       if (msg.status === 'live') {
         hideSessionOverlay();
       } else if (msg.status === 'created') {

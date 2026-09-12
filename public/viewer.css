@@ -145,7 +145,7 @@ html, body {
 
 /* Pure-transcription session (host's 啟用翻譯 off): only original ever
    renders, so the translation line never even shows an empty/duplicated
-   entry — see viewer.js's noteTranslateMode. */
+   entry — see viewer.js's setTranslateMode. */
 #app.no-translation .item-translation { display: none; }
 #app.no-translation .item-original {
   font-size: clamp(20px, 4.4vw, 32px);

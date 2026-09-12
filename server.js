@@ -271,6 +271,12 @@ function createSession() {
     joinCode,
     name: null,
     status: 'created',
+    // null = host hasn't clicked Start yet (unknown); [] = pure transcription
+    // (translation off); [lang] = one_way translation to `lang`. Set once at
+    // host_start and never changed after — see the host_start handler below.
+    // Viewers read this (via session_status) to decide their layout at join
+    // time, without waiting for/guessing from actual utterance content.
+    targetLangs: null,
     hostWs: null,
     viewers: new Set(),
     history: [],   // oldest → newest, capped at HISTORY_MAX
@@ -703,7 +709,7 @@ wss.on('connection', (ws) => {
         session.viewers.add(ws);
         console.log(`[viewer+] session=${session.id} total=${session.viewers.size}`);
         sendViewerCount(session);
-        send(ws, { type: 'session_status', status: session.status });
+        send(ws, { type: 'session_status', status: session.status, targetLangs: session.targetLangs });
         if (session.status === 'live') {
           send(ws, { type: 'backfill', utterances: session.history.slice(-BACKFILL_COUNT) });
         }
@@ -724,16 +730,19 @@ wss.on('connection', (ws) => {
       if (session.status === 'created') {
         session.status = 'live';
         session.startedAt = Date.now();
+        // What the host actually chose, for viewers (session_status,
+        // read at join time — see targetLangs comment on the session object)
+        // and for the DB record (SPEC §6.5) below. Fixed for the life of the
+        // session — the host can't change this mid-recording either.
+        session.targetLangs = msg.translateEnabled && typeof msg.targetLanguage === 'string'
+          ? [msg.targetLanguage]
+          : [];
         console.log(`[session ${session.id}] live`);
-        broadcastToViewers(session, { type: 'session_status', status: 'live' });
+        broadcastToViewers(session, { type: 'session_status', status: 'live', targetLangs: session.targetLangs });
         dbMarkSessionLive(session.id).catch((err) => {
           console.error(`[db] failed to mark session ${session.id} live:`, err);
         });
-        // Record-only (SPEC §6.5): what the host actually chose, for "my
-        // sessions" / future reference — does not affect the live path.
-        const targetLangs = msg.translateEnabled && typeof msg.targetLanguage === 'string'
-          ? [msg.targetLanguage]
-          : [];
+        const targetLangs = session.targetLangs;
         dbSetSessionLanguages(session.id, targetLangs).catch((err) => {
           console.error(`[db] failed to record language settings for session ${session.id}:`, err);
         });

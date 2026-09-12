@@ -74,22 +74,25 @@ function pickTranslation(u) {
 }
 
 // --- Translate on/off (host's 純轉錄模式) -----------------------------------
-// A pure-transcription session's host never puts anything in `translations`
-// (see host.js's sendUtterance/sendInterimSnapshot) — that's the signal, no
-// separate flag needed from the server. Locked in from the first utterance
-// this page sees for the session and never flips back, since the host can't
-// change this mid-recording either. Without this, pickTranslation's
-// original-as-fallback would just mirror the same text into both panes.
-let translateMode = null; // null = unknown yet, true/false once known
+// Decided from the session's own record (targetLangs, relayed in
+// session_status — see server.js's session.targetLangs) at join time, NOT
+// guessed from utterance content — a pure-transcription viewer must render
+// correctly even before the host has said anything. null = host hasn't
+// clicked Start yet (unknown); locked in the first time we see an actual
+// array, and never revisited (the host can't change this mid-recording).
+// A translation session (targetLangs non-empty) leaves every existing
+// pane/toggle exactly as it already renders — this only ever adds behavior
+// for the false case.
+let translateMode = null;
 function applyTranslateMode() {
   if (translateMode !== false) return;
   translationPaneEl.hidden = true;
   toggleOriginalLabelEl.hidden = true;
   appEl.classList.remove('hide-original'); // single pane must show original regardless of the checkbox
 }
-function noteTranslateMode(u) {
-  if (translateMode !== null || !u) return;
-  translateMode = !!(u.translations && Object.keys(u.translations).length);
+function setTranslateMode(targetLangs) {
+  if (translateMode !== null || !Array.isArray(targetLangs)) return;
+  translateMode = targetLangs.length > 0;
   applyTranslateMode();
 }
 
@@ -183,8 +186,7 @@ function render(liveOriginal, liveTranslation) {
 // Interim = the currently-open pair's growing snapshot (never a delta) —
 // just show it as the live tail after whatever's already settled.
 function applyInterim(u) {
-  noteTranslateMode(u);
-  render(u.original || '', pickTranslation(u));
+  render(u.original || '', translateMode === false ? '' : pickTranslation(u));
 }
 
 // The last utterance id this page has actually folded into its transcript.
@@ -197,9 +199,8 @@ let lastSeenId = null;
 // extends the pending tail rather than becoming its own line), then clear
 // the live tail until the next interim starts.
 function applyFinalUtterance(u) {
-  noteTranslateMode(u);
   foldText(originalFold, u.original || '');
-  foldText(translationFold, pickTranslation(u));
+  if (translateMode !== false) foldText(translationFold, pickTranslation(u));
   lastSeenId = u.id;
   render('', '');
 }
@@ -207,10 +208,9 @@ function applyFinalUtterance(u) {
 function renderBackfill(utterances) {
   originalFold = makeFoldState();
   translationFold = makeFoldState();
-  if (utterances.length) noteTranslateMode(utterances[0]);
   for (const u of utterances) {
     foldText(originalFold, u.original || '');
-    foldText(translationFold, pickTranslation(u));
+    if (translateMode !== false) foldText(translationFold, pickTranslation(u));
   }
   lastSeenId = utterances.length ? utterances[utterances.length - 1].id : lastSeenId;
   render('', '');
@@ -340,6 +340,7 @@ function connect() {
       return;
     }
     if (msg.type === 'session_status') {
+      setTranslateMode(msg.targetLangs);
       if (msg.status === 'live') {
         hideSessionOverlay();
       } else if (msg.status === 'created') {
