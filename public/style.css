@@ -1,4 +1,9 @@
 * { box-sizing: border-box; }
+/* Author `display` rules (e.g. `.pane { display: flex }`) otherwise beat the
+   UA's `[hidden] { display: none }` regardless of specificity — this makes
+   the hidden attribute always win, so `el.hidden = true` actually hides
+   flex/grid items instead of leaving them in the layout. */
+[hidden] { display: none !important; }
 body {
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
   margin: 0;
