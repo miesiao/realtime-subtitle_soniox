@@ -105,6 +105,18 @@ export async function dbInsertSession({ id, joinCode, name, sourceLang, targetLa
   );
 }
 
+// Records what the host actually chose at Start time (SPEC §6.5 "如實記
+// 錄") — target_langs is empty for a pure-transcription session. Purely a
+// record for "my sessions" / future reference; never read back to drive any
+// live behavior.
+export async function dbSetSessionLanguages(id, targetLangs) {
+  if (!dbReady()) return;
+  await pool.query(
+    `UPDATE sessions SET target_langs = $2 WHERE id = $1`,
+    [id, targetLangs && targetLangs.length ? targetLangs : null]
+  );
+}
+
 export async function dbMarkSessionLive(id) {
   if (!dbReady()) return;
   await pool.query(

@@ -10,7 +10,7 @@
 
   <header>
     <h1>Host（一段式：聽寫＋翻譯）</h1>
-    <div class="model-info">model: stt-rt-v5 · language_hints: zh, en, es · one_way translation</div>
+    <div class="model-info">model: stt-rt-v5 · language_hints: zh, en, es · one_way translation（可關閉，純轉錄場合不觸發）</div>
     <div class="model-info">這頁不再是給觀眾看的畫面——觀眾請開 <code>/viewer</code>。這裡只是 host 自己校對用的監看畫面。</div>
   </header>
 
@@ -50,7 +50,11 @@
   </section>
 
   <section class="controls">
-    <label>
+    <label class="translate-toggle">
+      <input type="checkbox" id="translateEnabled" checked />
+      啟用翻譯
+    </label>
+    <label id="targetLangWrap">
       目標語言 (target_language)
       <select id="targetLang">
         <option value="zh">中文 (zh)</option>
@@ -75,7 +79,7 @@
     <textarea id="terms" rows="2" placeholder="例：Soniox, WebSocket, 即時字幕"></textarea>
   </section>
 
-  <main class="columns">
+  <main id="columnsMain" class="columns">
     <div class="pane">
       <div class="pane-header">
         <span>原文 (original)</span>
@@ -83,7 +87,7 @@
       </div>
       <div id="originalText" class="pane-body"></div>
     </div>
-    <div class="pane">
+    <div id="translationPaneWrap" class="pane">
       <div class="pane-header">
         <span>譯文 (translation)</span>
         <span id="translationScript" class="script-badge"></span>

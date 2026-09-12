@@ -74,7 +74,11 @@ const startBtn = document.getElementById('startBtn');
 const stopBtn = document.getElementById('stopBtn');
 const clearBtn = document.getElementById('clearBtn');
 const endSessionBtn = document.getElementById('endSessionBtn');
+const translateEnabledEl = document.getElementById('translateEnabled');
+const targetLangWrapEl = document.getElementById('targetLangWrap');
 const targetLangSelect = document.getElementById('targetLang');
+const columnsMainEl = document.getElementById('columnsMain');
+const translationPaneWrapEl = document.getElementById('translationPaneWrap');
 const termsInput = document.getElementById('terms');
 const statusEl = document.getElementById('status');
 const wsStatusEl = document.getElementById('wsStatus');
@@ -131,6 +135,21 @@ async function loadWhoAmI() {
   }
 }
 loadWhoAmI();
+
+// --- Translate on/off (純轉錄模式) -----------------------------------------
+// Off means: no `translation` key at all in the Soniox config (not an empty
+// one) — see startRecording — so pure-dictation sessions never trigger
+// Soniox's translation tokens. Purely a host-side switch; server/viewer
+// already treat an empty `translations` object as "nothing to show", so no
+// server or viewer changes are needed for this to render correctly.
+function applyTranslateModeUI() {
+  const on = translateEnabledEl.checked;
+  targetLangWrapEl.hidden = !on;
+  translationPaneWrapEl.hidden = !on;
+  columnsMainEl.classList.toggle('single-column', !on);
+}
+translateEnabledEl.addEventListener('change', applyTranslateModeUI);
+applyTranslateModeUI();
 
 const LANG_CLASS = { zh: 'lang-zh', en: 'lang-en', es: 'lang-es' };
 function langClass(lang) {
@@ -363,8 +382,9 @@ function logSent(original, translations) {
 function sendUtterance(original, translation) {
   const trimmedOriginal = original.trim();
   if (!trimmedOriginal) return;
-  const target = targetLangSelect.value;
-  const translations = { [target]: (translation.trim() || trimmedOriginal) };
+  const translations = translateEnabledEl.checked
+    ? { [targetLangSelect.value]: (translation.trim() || trimmedOriginal) }
+    : {};
   if (ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: 'host_utterance', original: trimmedOriginal, translations }));
   }
@@ -450,9 +470,9 @@ function currentInterimTranslation() {
 function sendInterimSnapshot() {
   const original = currentInterimOriginal();
   if (!original.trim()) return;
-  const target = targetLangSelect.value;
-  const translationText = currentInterimTranslation();
-  const translations = { [target]: (translationText.trim() || original) };
+  const translations = translateEnabledEl.checked
+    ? { [targetLangSelect.value]: (currentInterimTranslation().trim() || original) }
+    : {};
   if (ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: 'host_interim', original, translations }));
   }
@@ -593,6 +613,7 @@ function handleEndpoint() {
 function setUiRecording(isRecording) {
   startBtn.disabled = isRecording;
   stopBtn.disabled = !isRecording;
+  translateEnabledEl.disabled = isRecording;
   targetLangSelect.disabled = isRecording;
   termsInput.disabled = isRecording;
 }
@@ -680,8 +701,13 @@ function startRecording() {
     language_hints: ['zh', 'en', 'es'],
     enable_language_identification: true,
     enable_endpoint_detection: true,
-    translation: { type: 'one_way', target_language: targetLangSelect.value },
   };
+  // Pure-transcription mode omits this key entirely (not an empty/no-op
+  // value) so Soniox never runs translation on the stream at all — see the
+  // "啟用翻譯" toggle and applyTranslateModeUI above.
+  if (translateEnabledEl.checked) {
+    config.translation = { type: 'one_way', target_language: targetLangSelect.value };
+  }
   if (terms.length) config.context = { terms };
 
   // The client's config callback (see `new SonioxClient` above) fetches a
@@ -725,8 +751,15 @@ startBtn.addEventListener('click', () => {
   userWantsRecording = true;
   // First Start flips the session created → live (SPEC §4); a later
   // pause/Start cycle re-sends this but the server treats it as a no-op.
+  // translateEnabled/targetLanguage are only for the session's DB record
+  // (SPEC §6.5 "如實記錄") — they don't affect Soniox itself, which is
+  // config'd separately in startRecording() below from the same two controls.
   if (ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type: 'host_start' }));
+    ws.send(JSON.stringify({
+      type: 'host_start',
+      translateEnabled: translateEnabledEl.checked,
+      targetLanguage: targetLangSelect.value,
+    }));
   }
   startRecording();
 });

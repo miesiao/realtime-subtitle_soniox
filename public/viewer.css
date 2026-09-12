@@ -142,3 +142,14 @@ html, body {
 }
 
 #app.hide-original .item-original { display: none; }
+
+/* Pure-transcription session (host's 啟用翻譯 off): only original ever
+   renders, so the translation line never even shows an empty/duplicated
+   entry — see viewer.js's noteTranslateMode. */
+#app.no-translation .item-translation { display: none; }
+#app.no-translation .item-original {
+  font-size: clamp(20px, 4.4vw, 32px);
+  font-weight: 700;
+  color: #f0f6fc;
+  margin-bottom: 0;
+}

@@ -10,6 +10,7 @@ const connStatusEl = document.getElementById('connStatus');
 const connBannerEl = document.getElementById('connBanner');
 const sessionOverlayEl = document.getElementById('sessionOverlay');
 const showOriginalEl = document.getElementById('showOriginal');
+const toggleOriginalLabelEl = document.getElementById('toggleOriginal');
 const feedPaneEl = document.getElementById('feedPane');
 const feedInnerEl = document.getElementById('feedInner');
 const loadMoreEl = document.getElementById('loadMoreIndicator');
@@ -40,6 +41,22 @@ applyOriginalVisibility();
 function pickTranslation(u) {
   const values = Object.values(u.translations || {});
   return values.length && values[0] ? values[0] : u.original;
+}
+
+// --- Translate on/off (host's 純轉錄模式) -----------------------------------
+// See viewer2.js's identical comment: a pure-transcription host never puts
+// anything in `translations`, so the first utterance's shape is the signal.
+let translateMode = null;
+function applyTranslateMode() {
+  if (translateMode !== false) return;
+  appEl.classList.add('no-translation');
+  appEl.classList.remove('hide-original');
+  toggleOriginalLabelEl.hidden = true;
+}
+function noteTranslateMode(u) {
+  if (translateMode !== null || !u) return;
+  translateMode = !!(u.translations && Object.keys(u.translations).length);
+  applyTranslateMode();
 }
 
 // --- Sentence splitting (cosmetic, in-item only) -----------------------------
@@ -137,6 +154,7 @@ let loadingMore = false;
 // wholesale each time; no diffing, so a dropped packet self-corrects the
 // instant the next snapshot arrives.
 function applyInterim(u) {
+  noteTranslateMode(u);
   const original = u.original || '';
   const translationText = pickTranslation(u);
   if (!original.trim() && !translationText.trim()) return; // nothing to show yet
@@ -149,6 +167,7 @@ function applyInterim(u) {
 // final somehow arrived with no preceding interim) with the authoritative
 // text, then clear the live slot so the next interim starts a fresh item.
 function applyFinalUtterance(u) {
+  noteTranslateMode(u);
   if (earliestId === null) earliestId = u.id;
   const item = ensureLiveItem();
   item.dataset.id = String(u.id);
@@ -188,6 +207,7 @@ function renderBackfill(utterances) {
   liveItemEl = null;
   placeholderEl = null;
 
+  if (utterances.length) noteTranslateMode(utterances[0]);
   for (const u of utterances) {
     feedInnerEl.appendChild(createFeedItem(u.original, pickTranslation(u), { live: false, id: u.id }));
   }

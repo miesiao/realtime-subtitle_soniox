@@ -17,6 +17,7 @@ import {
   runMigrations,
   dbInsertSession,
   dbMarkSessionLive,
+  dbSetSessionLanguages,
   dbMarkSessionEnded,
   dbRenameSession,
   dbInsertTranscriptLine,
@@ -727,6 +728,14 @@ wss.on('connection', (ws) => {
         broadcastToViewers(session, { type: 'session_status', status: 'live' });
         dbMarkSessionLive(session.id).catch((err) => {
           console.error(`[db] failed to mark session ${session.id} live:`, err);
+        });
+        // Record-only (SPEC §6.5): what the host actually chose, for "my
+        // sessions" / future reference — does not affect the live path.
+        const targetLangs = msg.translateEnabled && typeof msg.targetLanguage === 'string'
+          ? [msg.targetLanguage]
+          : [];
+        dbSetSessionLanguages(session.id, targetLangs).catch((err) => {
+          console.error(`[db] failed to record language settings for session ${session.id}:`, err);
         });
       }
       return;

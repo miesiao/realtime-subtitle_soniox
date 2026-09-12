@@ -10,6 +10,7 @@ const connStatusEl = document.getElementById('connStatus');
 const connBannerEl = document.getElementById('connBanner');
 const sessionOverlayEl = document.getElementById('sessionOverlay');
 const showOriginalEl = document.getElementById('showOriginal');
+const toggleOriginalLabelEl = document.getElementById('toggleOriginal');
 const originalPaneEl = document.getElementById('originalPane');
 const originalContentEl = document.getElementById('originalContent');
 const translationPaneEl = document.getElementById('translationPane');
@@ -70,6 +71,26 @@ applyZoomScale();
 function pickTranslation(u) {
   const values = Object.values(u.translations || {});
   return values.length && values[0] ? values[0] : u.original;
+}
+
+// --- Translate on/off (host's 純轉錄模式) -----------------------------------
+// A pure-transcription session's host never puts anything in `translations`
+// (see host.js's sendUtterance/sendInterimSnapshot) — that's the signal, no
+// separate flag needed from the server. Locked in from the first utterance
+// this page sees for the session and never flips back, since the host can't
+// change this mid-recording either. Without this, pickTranslation's
+// original-as-fallback would just mirror the same text into both panes.
+let translateMode = null; // null = unknown yet, true/false once known
+function applyTranslateMode() {
+  if (translateMode !== false) return;
+  translationPaneEl.hidden = true;
+  toggleOriginalLabelEl.hidden = true;
+  appEl.classList.remove('hide-original'); // single pane must show original regardless of the checkbox
+}
+function noteTranslateMode(u) {
+  if (translateMode !== null || !u) return;
+  translateMode = !!(u.translations && Object.keys(u.translations).length);
+  applyTranslateMode();
 }
 
 // --- Sentence splitting (pure punctuation matching, no AI) -----------------
@@ -162,6 +183,7 @@ function render(liveOriginal, liveTranslation) {
 // Interim = the currently-open pair's growing snapshot (never a delta) —
 // just show it as the live tail after whatever's already settled.
 function applyInterim(u) {
+  noteTranslateMode(u);
   render(u.original || '', pickTranslation(u));
 }
 
@@ -175,6 +197,7 @@ let lastSeenId = null;
 // extends the pending tail rather than becoming its own line), then clear
 // the live tail until the next interim starts.
 function applyFinalUtterance(u) {
+  noteTranslateMode(u);
   foldText(originalFold, u.original || '');
   foldText(translationFold, pickTranslation(u));
   lastSeenId = u.id;
@@ -184,6 +207,7 @@ function applyFinalUtterance(u) {
 function renderBackfill(utterances) {
   originalFold = makeFoldState();
   translationFold = makeFoldState();
+  if (utterances.length) noteTranslateMode(utterances[0]);
   for (const u of utterances) {
     foldText(originalFold, u.original || '');
     foldText(translationFold, pickTranslation(u));
