@@ -723,30 +723,46 @@ wss.on('connection', (ws) => {
     const session = sessionId ? sessions.get(sessionId) : null;
     if (!session) return;
 
-    // Host clicked Start (SPEC §4 state machine): created → live. Idempotent
-    // — a pause/Start cycle mid-broadcast re-sends this but the session is
-    // already live, so it's a no-op rather than resetting startedAt.
+    // Host clicked Start (SPEC §4 state machine): created → live, exactly
+    // once — a later pause/Start cycle re-sends this while already live, and
+    // must NOT reset startedAt or re-fire dbMarkSessionLive.
+    //
+    // Settings sync (targetLangs/sourceLangs → session object, DB, and the
+    // viewer broadcast below), by contrast, runs on EVERY host_start, first
+    // or not: pausing to change source/target language and pressing Start
+    // again reuses this same session/join_code (SPEC: join_code never
+    // changes), so this is the only place that change can ever reach the
+    // server, the DB record, and already-connected viewers. Previously this
+    // whole block was gated behind the created→live transition, so a
+    // mid-session settings change silently never left the host's browser.
     if (role === 'host' && msg.type === 'host_start') {
-      if (session.status === 'created') {
+      if (session.status === 'ended') return; // can't restart an ended session
+      const firstStart = session.status === 'created';
+      if (firstStart) {
         session.status = 'live';
         session.startedAt = Date.now();
-        // What the host actually chose, for viewers (session_status,
-        // read at join time — see targetLangs comment on the session object)
-        // and for the DB record (SPEC §6.5) below. Fixed for the life of the
-        // session — the host can't change this mid-recording either.
-        session.targetLangs = msg.translateEnabled && typeof msg.targetLanguage === 'string'
-          ? [msg.targetLanguage]
-          : [];
         console.log(`[session ${session.id}] live`);
-        broadcastToViewers(session, { type: 'session_status', status: 'live', targetLangs: session.targetLangs });
+      }
+      // What the host actually chose, for viewers (session_status, read at
+      // join time AND on every subsequent broadcast — see targetLangs
+      // comment on the session object) and for the DB record (SPEC §6.5).
+      session.targetLangs = msg.translateEnabled && typeof msg.targetLanguage === 'string'
+        ? [msg.targetLanguage]
+        : [];
+      broadcastToViewers(session, { type: 'session_status', status: 'live', targetLangs: session.targetLangs });
+      if (firstStart) {
         dbMarkSessionLive(session.id).catch((err) => {
           console.error(`[db] failed to mark session ${session.id} live:`, err);
         });
-        const targetLangs = session.targetLangs;
-        dbSetSessionLanguages(session.id, targetLangs).catch((err) => {
-          console.error(`[db] failed to record language settings for session ${session.id}:`, err);
-        });
       }
+      // sourceLangs is host.js's language_hints selection (['auto'] or a
+      // list of codes — see currentSourceLangSelection there); record-only,
+      // same as targetLangs above — falls back to ['auto'] for a malformed
+      // message rather than silently recording nothing.
+      const sourceLangs = Array.isArray(msg.sourceLangs) && msg.sourceLangs.length ? msg.sourceLangs : ['auto'];
+      dbSetSessionLanguages(session.id, { sourceLangs, targetLangs: session.targetLangs }).catch((err) => {
+        console.error(`[db] failed to record language settings for session ${session.id}:`, err);
+      });
       return;
     }
 

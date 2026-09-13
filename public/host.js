@@ -1,5 +1,6 @@
 import { SonioxClient } from '/vendor/soniox-client.mjs';
 import * as OpenCC from '/vendor/opencc-cn2t.mjs';
+import { COMMON_LANGUAGES, MORE_LANGUAGES, DEFAULT_SOURCE_LANG_CODES } from '/languages.js';
 
 // --- Host password gate (protects the one endpoint that costs money) ------
 // Not a real account system — just a shared password kept in localStorage.
@@ -74,6 +75,12 @@ const startBtn = document.getElementById('startBtn');
 const stopBtn = document.getElementById('stopBtn');
 const clearBtn = document.getElementById('clearBtn');
 const endSessionBtn = document.getElementById('endSessionBtn');
+const commonLangsEl = document.getElementById('commonLangs');
+const autoDetectLangEl = document.getElementById('autoDetectLang');
+const moreLangsDetailsEl = document.getElementById('moreLangsDetails');
+const moreLangSearchEl = document.getElementById('moreLangSearch');
+const moreLangsEl = document.getElementById('moreLangs');
+const sourceLangErrorEl = document.getElementById('sourceLangError');
 const translateEnabledEl = document.getElementById('translateEnabled');
 const targetLangWrapEl = document.getElementById('targetLangWrap');
 const targetLangSelect = document.getElementById('targetLang');
@@ -135,6 +142,79 @@ async function loadWhoAmI() {
   }
 }
 loadWhoAmI();
+
+// --- Source language picker (language_hints) --------------------------------
+// language_hints only ever *biases* Soniox toward these languages — it's not
+// a hard lock — so the tighter and more accurate the set, the better the
+// recognition; leaving it empty (auto-detect) is the least accurate option,
+// which is why it's an opt-in escape hatch rather than the default. Fully
+// independent of the translate on/off switch below: source language and
+// target/translation are two unrelated Soniox settings.
+const langCheckboxByCode = new Map();
+
+function createLangCheckboxLabel(lang, checked) {
+  const label = document.createElement('label');
+  label.className = 'lang-checkbox';
+  const input = document.createElement('input');
+  input.type = 'checkbox';
+  input.value = lang.code;
+  input.checked = checked;
+  input.addEventListener('change', () => {
+    sourceLangErrorEl.hidden = true; // any change clears a stale validation error
+  });
+  label.appendChild(input);
+  label.appendChild(document.createTextNode(` ${lang.name} (${lang.code})`));
+  langCheckboxByCode.set(lang.code, input);
+  return label;
+}
+
+for (const lang of COMMON_LANGUAGES) {
+  commonLangsEl.appendChild(createLangCheckboxLabel(lang, DEFAULT_SOURCE_LANG_CODES.includes(lang.code)));
+}
+for (const lang of MORE_LANGUAGES) {
+  const label = createLangCheckboxLabel(lang, false);
+  label.dataset.searchText = `${lang.name} ${lang.code}`.toLowerCase();
+  moreLangsEl.appendChild(label);
+}
+
+moreLangSearchEl.addEventListener('input', () => {
+  const q = moreLangSearchEl.value.trim().toLowerCase();
+  for (const label of moreLangsEl.children) {
+    label.hidden = q.length > 0 && !label.dataset.searchText.includes(q);
+  }
+});
+
+// Auto-detect and the language checkboxes are mutually exclusive: turning
+// auto-detect on disables AND clears every checkbox (not just disables —
+// SPEC: "清空"), so the two states can never coexist.
+function applyAutoDetectUI() {
+  const auto = autoDetectLangEl.checked;
+  for (const cb of langCheckboxByCode.values()) {
+    cb.disabled = auto;
+    if (auto) cb.checked = false;
+  }
+  moreLangSearchEl.disabled = auto;
+  sourceLangErrorEl.hidden = true;
+}
+autoDetectLangEl.addEventListener('change', applyAutoDetectUI);
+applyAutoDetectUI();
+
+function currentSourceLangSelection() {
+  const autoDetect = autoDetectLangEl.checked;
+  const codes = autoDetect
+    ? []
+    : [...langCheckboxByCode.entries()].filter(([, cb]) => cb.checked).map(([code]) => code);
+  return { autoDetect, codes };
+}
+
+// Boundary case (SPEC point 3): everything unchecked AND not auto-detect is
+// blocked, never silently treated as "no hints" — that's exactly the
+// auto-detect state, and it must be chosen explicitly, not fallen into.
+function validateSourceLangSelection(selection) {
+  const invalid = !selection.autoDetect && selection.codes.length === 0;
+  sourceLangErrorEl.hidden = !invalid;
+  return !invalid;
+}
 
 // --- Translate on/off (純轉錄模式) -----------------------------------------
 // Off means: no `translation` key at all in the Soniox config (not an empty
@@ -613,6 +693,14 @@ function handleEndpoint() {
 function setUiRecording(isRecording) {
   startBtn.disabled = isRecording;
   stopBtn.disabled = !isRecording;
+  autoDetectLangEl.disabled = isRecording;
+  moreLangSearchEl.disabled = isRecording;
+  for (const cb of langCheckboxByCode.values()) {
+    // Don't fight applyAutoDetectUI's own disabling of these while
+    // auto-detect is checked — only re-enable on stop if auto-detect isn't
+    // also holding them disabled.
+    cb.disabled = isRecording || autoDetectLangEl.checked;
+  }
   translateEnabledEl.disabled = isRecording;
   targetLangSelect.disabled = isRecording;
   termsInput.disabled = isRecording;
@@ -698,10 +786,16 @@ function startRecording() {
   const terms = parseTerms(termsInput.value);
   const config = {
     model: 'stt-rt-v5',
-    language_hints: ['zh', 'en', 'es'],
     enable_language_identification: true,
     enable_endpoint_detection: true,
   };
+  // Auto-detect omits this key entirely — see currentSourceLangSelection and
+  // the "自動偵測" toggle above. startBtn's click handler already validated
+  // this selection before startRecording() was ever called.
+  const sourceSelection = currentSourceLangSelection();
+  if (!sourceSelection.autoDetect) {
+    config.language_hints = sourceSelection.codes;
+  }
   // Pure-transcription mode omits this key entirely (not an empty/no-op
   // value) so Soniox never runs translation on the stream at all — see the
   // "啟用翻譯" toggle and applyTranslateModeUI above.
@@ -747,18 +841,24 @@ function startRecording() {
 }
 
 startBtn.addEventListener('click', () => {
+  // Boundary case (SPEC point 3): block Start rather than silently falling
+  // back to "no hints" if nothing is checked and auto-detect isn't chosen.
+  const sourceSelection = currentSourceLangSelection();
+  if (!validateSourceLangSelection(sourceSelection)) return;
+
   sonioxRetryCount = 0; // manual Start always gets a fresh retry budget
   userWantsRecording = true;
   // First Start flips the session created → live (SPEC §4); a later
   // pause/Start cycle re-sends this but the server treats it as a no-op.
-  // translateEnabled/targetLanguage are only for the session's DB record
-  // (SPEC §6.5 "如實記錄") — they don't affect Soniox itself, which is
-  // config'd separately in startRecording() below from the same two controls.
+  // translateEnabled/targetLanguage/sourceLangs are only for the session's DB
+  // record (SPEC §6.5 "如實記錄") — they don't affect Soniox itself, which is
+  // config'd separately in startRecording() below from the same controls.
   if (ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({
       type: 'host_start',
       translateEnabled: translateEnabledEl.checked,
       targetLanguage: targetLangSelect.value,
+      sourceLangs: sourceSelection.autoDetect ? ['auto'] : sourceSelection.codes,
     }));
   }
   startRecording();

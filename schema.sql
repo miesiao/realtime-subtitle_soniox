@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   join_code           TEXT UNIQUE NOT NULL,
   name                TEXT,
   status              TEXT NOT NULL DEFAULT 'created',
-  source_lang         TEXT,
+  source_lang         TEXT, -- superseded by source_langs below; unused, left in place
   target_langs        TEXT[],
   cleaned_transcript  TEXT,
   processing_status   TEXT,
@@ -36,6 +36,15 @@ CREATE TABLE IF NOT EXISTS sessions (
 -- "my sessions" list or pass the ownership checks on rename/transcript.
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES users(id);
 CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions (user_id);
+
+-- Replaces source_lang (single value) with a multi-select-capable array —
+-- see host.js's language_hints picker. Semantics match target_langs: NULL =
+-- host hasn't clicked Start yet (unknown); ['auto'] = auto-detect chosen
+-- explicitly (a sentinel — no real Soniox language code is 4 letters);
+-- ['zh','en',...] = specific language_hints. Nothing ever reads the old
+-- source_lang column (it was always NULL in practice), so it's left in place
+-- rather than migrated — no existing data, nothing to break.
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS source_langs TEXT[];
 
 CREATE TABLE IF NOT EXISTS transcript_lines (
   id             BIGSERIAL PRIMARY KEY,

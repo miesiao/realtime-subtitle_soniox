@@ -74,25 +74,32 @@ function pickTranslation(u) {
 }
 
 // --- Translate on/off (host's 純轉錄模式) -----------------------------------
-// Decided from the session's own record (targetLangs, relayed in
-// session_status — see server.js's session.targetLangs) at join time, NOT
-// guessed from utterance content — a pure-transcription viewer must render
-// correctly even before the host has said anything. null = host hasn't
-// clicked Start yet (unknown); locked in the first time we see an actual
-// array, and never revisited (the host can't change this mid-recording).
-// A translation session (targetLangs non-empty) leaves every existing
-// pane/toggle exactly as it already renders — this only ever adds behavior
-// for the false case.
+// Decided from the session's own record (targetLangs, relayed on every
+// session_status — see server.js's session.targetLangs) at join time AND
+// re-derived on every subsequent session_status, NOT guessed from utterance
+// content and NOT locked in after the first read: the host can pause,
+// change source/target language or the translate toggle, and Start again
+// without a new join_code (server.js now re-broadcasts session_status with
+// the updated targetLangs on every host_start, not just the first). null =
+// host hasn't clicked Start yet (unknown) — leave whatever's currently
+// rendered untouched until a real array arrives.
 let translateMode = null;
 function applyTranslateMode() {
-  if (translateMode !== false) return;
-  translationPaneEl.hidden = true;
-  toggleOriginalLabelEl.hidden = true;
-  appEl.classList.remove('hide-original'); // single pane must show original regardless of the checkbox
+  if (translateMode === false) {
+    translationPaneEl.hidden = true;
+    toggleOriginalLabelEl.hidden = true;
+    appEl.classList.remove('hide-original'); // single pane must show original regardless of the checkbox
+  } else {
+    translationPaneEl.hidden = false;
+    toggleOriginalLabelEl.hidden = false;
+    applyOriginalVisibility(); // restore per the "顯示原文" checkbox, unused while pure-transcription hid it
+  }
 }
 function setTranslateMode(targetLangs) {
-  if (translateMode !== null || !Array.isArray(targetLangs)) return;
-  translateMode = targetLangs.length > 0;
+  if (!Array.isArray(targetLangs)) return;
+  const next = targetLangs.length > 0;
+  if (next === translateMode) return; // no actual change — skip the redundant re-render
+  translateMode = next;
   applyTranslateMode();
 }
 

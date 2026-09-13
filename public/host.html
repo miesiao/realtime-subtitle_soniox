@@ -10,7 +10,7 @@
 
   <header>
     <h1>Host（一段式：聽寫＋翻譯）</h1>
-    <div class="model-info">model: stt-rt-v5 · language_hints: zh, en, es · one_way translation（可關閉，純轉錄場合不觸發）</div>
+    <div class="model-info">model: stt-rt-v5 · language_hints: 依下方「來源語言」勾選 · one_way translation（可關閉，純轉錄場合不觸發）</div>
     <div class="model-info">這頁不再是給觀眾看的畫面——觀眾請開 <code>/viewer</code>。這裡只是 host 自己校對用的監看畫面。</div>
   </header>
 
@@ -46,6 +46,23 @@
       <button id="retryTranscriptBtn" type="button" hidden>重新整理</button>
       <button id="downloadTranscriptBtn" type="button" hidden>下載逐字稿 (.txt)</button>
       <pre id="transcriptText" style="white-space:pre-wrap; margin-top:8px;"></pre>
+    </div>
+  </section>
+
+  <section class="source-lang">
+    <div class="source-lang-header">來源語言 (language_hints)</div>
+    <div id="commonLangs" class="lang-checkboxes"></div>
+    <label class="auto-detect-toggle">
+      <input type="checkbox" id="autoDetectLang" />
+      自動偵測（不指定語言，準確度可能較低）
+    </label>
+    <details id="moreLangsDetails">
+      <summary>更多語言 ▾</summary>
+      <input type="search" id="moreLangSearch" placeholder="搜尋語言（中/英文名稱或代碼）…" />
+      <div id="moreLangs" class="lang-checkboxes"></div>
+    </details>
+    <div id="sourceLangError" class="session-error" hidden>
+      <span>請至少選擇一種來源語言，或選擇自動偵測</span>
     </div>
   </section>
 

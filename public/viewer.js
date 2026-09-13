@@ -45,18 +45,27 @@ function pickTranslation(u) {
 
 // --- Translate on/off (host's 純轉錄模式) -----------------------------------
 // See viewer2.js's identical comment: decided from the session's own record
-// (targetLangs, relayed in session_status) at join time, not guessed from
-// utterance content.
+// (targetLangs, relayed on every session_status) at join time AND re-derived
+// on every subsequent session_status — never locked in after the first read,
+// since the host can pause, change language/translate settings and Start
+// again without a new join_code.
 let translateMode = null;
 function applyTranslateMode() {
-  if (translateMode !== false) return;
-  appEl.classList.add('no-translation');
-  appEl.classList.remove('hide-original');
-  toggleOriginalLabelEl.hidden = true;
+  if (translateMode === false) {
+    appEl.classList.add('no-translation');
+    appEl.classList.remove('hide-original');
+    toggleOriginalLabelEl.hidden = true;
+  } else {
+    appEl.classList.remove('no-translation');
+    toggleOriginalLabelEl.hidden = false;
+    applyOriginalVisibility(); // restore per the "顯示原文" checkbox
+  }
 }
 function setTranslateMode(targetLangs) {
-  if (translateMode !== null || !Array.isArray(targetLangs)) return;
-  translateMode = targetLangs.length > 0;
+  if (!Array.isArray(targetLangs)) return;
+  const next = targetLangs.length > 0;
+  if (next === translateMode) return;
+  translateMode = next;
   applyTranslateMode();
 }
 

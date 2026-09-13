@@ -106,14 +106,17 @@ export async function dbInsertSession({ id, joinCode, name, sourceLang, targetLa
 }
 
 // Records what the host actually chose at Start time (SPEC §6.5 "如實記
-// 錄") — target_langs is empty for a pure-transcription session. Purely a
-// record for "my sessions" / future reference; never read back to drive any
-// live behavior.
-export async function dbSetSessionLanguages(id, targetLangs) {
+// 錄"). Purely a record for "my sessions" / future reference; never read
+// back to drive any live behavior. `null` (omitted/undefined here) means
+// "never recorded" — a real empty array (pure-transcription's target_langs,
+// or source_langs' own ['auto'] sentinel — see schema.sql) is written as-is,
+// distinct from null, since node-postgres serializes a JS `[]` to a real
+// empty Postgres array rather than collapsing it.
+export async function dbSetSessionLanguages(id, { sourceLangs, targetLangs } = {}) {
   if (!dbReady()) return;
   await pool.query(
-    `UPDATE sessions SET target_langs = $2 WHERE id = $1`,
-    [id, targetLangs && targetLangs.length ? targetLangs : null]
+    `UPDATE sessions SET source_langs = $2, target_langs = $3 WHERE id = $1`,
+    [id, sourceLangs ?? null, targetLangs ?? null]
   );
 }
 
