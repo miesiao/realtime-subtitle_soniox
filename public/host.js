@@ -690,6 +690,53 @@ function handleEndpoint() {
   flushPair();
 }
 
+// --- Screen Wake Lock (keep the host's screen from sleeping while live) ----
+// Purely additive to the recording lifecycle below — never blocks or throws
+// into it. Feature-detected (silently no-op on browsers without
+// navigator.wakeLock) and every failure is caught-and-logged only, since a
+// wake lock is a nice-to-have, not something that should ever stop a
+// recording from starting.
+let wakeLockSentinel = null;
+
+async function requestWakeLock() {
+  if (!('wakeLock' in navigator)) return;
+  try {
+    wakeLockSentinel = await navigator.wakeLock.request('screen');
+    wakeLockSentinel.addEventListener('release', () => {
+      wakeLockSentinel = null;
+    });
+  } catch (err) {
+    // e.g. battery saver mode rejecting the request — log only.
+    console.log('Wake lock request failed:', err);
+  }
+}
+
+async function releaseWakeLock() {
+  if (!wakeLockSentinel) return;
+  const sentinel = wakeLockSentinel;
+  wakeLockSentinel = null;
+  try {
+    await sentinel.release();
+  } catch (err) {
+    console.log('Wake lock release failed:', err);
+  }
+}
+
+// The OS/browser force-releases the lock whenever the tab goes to the
+// background — there is no way to prevent that, only to notice coming back
+// and re-acquire it. Without this, a host who switches apps mid-session and
+// returns would silently lose wake-lock protection for the rest of the talk.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && userWantsRecording) {
+    console.log('Tab back in foreground while live — re-requesting wake lock');
+    requestWakeLock();
+  }
+});
+
+window.addEventListener('pagehide', () => {
+  releaseWakeLock();
+});
+
 function setUiRecording(isRecording) {
   startBtn.disabled = isRecording;
   stopBtn.disabled = !isRecording;
@@ -704,6 +751,11 @@ function setUiRecording(isRecording) {
   translateEnabledEl.disabled = isRecording;
   targetLangSelect.disabled = isRecording;
   termsInput.disabled = isRecording;
+  if (isRecording) {
+    requestWakeLock();
+  } else {
+    releaseWakeLock();
+  }
 }
 
 function parseTerms(raw) {
