@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>我的場次 — Subtii</title>
+<title>字幕間 — Subtii</title>
 <link rel="stylesheet" href="/ds.css" />
 <link rel="stylesheet" href="/sessions.css" />
 </head>
@@ -25,10 +25,10 @@
         <div class="m text-muted summary-label">點數餘額</div>
         <div class="summary-amount"><span id="creditsAmount">…</span> <span class="summary-unit">點</span></div>
       </div>
-      <a href="/host" class="card summary-cta">
-        <div class="summary-cta-title">開新場次</div>
+      <button id="newSessionBtn" type="button" class="card summary-cta">
+        <div class="summary-cta-title">＋ 開新場次</div>
         <div class="text-muted summary-cta-sub">設語言 → 拿 QR → 開播</div>
-      </a>
+      </button>
     </div>
 
     <section class="list-section">
@@ -53,6 +53,8 @@
         <span class="tag statusBadge"></span>
         <span class="tag processingBadge"></span>
         <span class="createdAt m text-muted"></span>
+        <a class="btn btn-secondary openBtn" href="#">回到控場</a>
+        <button class="btn btn-secondary deleteBtn" type="button">刪除</button>
       </div>
       <div class="session-row-name">
         <input class="input session-name-input" type="text" placeholder="（未命名）" />

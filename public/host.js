@@ -435,18 +435,15 @@ function connectWs() {
 // link (that's `joinCode`, the capability-based ticket — see §3).
 let currentSession = null; // { id, joinCode, viewerUrl, qrDataUrl }
 
-// Login (not HOST_SECRET) now authorizes creating a session (SPEC §3a point
-// 3) — the cookie goes along automatically on a same-origin fetch. A 401
-// here means the session cookie is gone (e.g. expired mid-visit); bounce
-// back through Google rather than showing a dead-end error.
-async function createSession() {
-  const res = await fetch('/api/sessions', { method: 'POST', credentials: 'same-origin' });
-  if (res.status === 401) {
-    redirectToLogin();
-    throw new Error('login_required');
-  }
-  if (!res.ok) throw new Error('Failed to create session');
-  return res.json();
+// /host now operates on ONE EXISTING session, created explicitly by the
+// "＋ 開新場次" button on 字幕間 (POST /api/sessions happens there, not
+// here) — loading/refreshing this page must never create a new session on
+// its own, or every visit leaves behind another zombie `created` row. The
+// session id travels in the URL (?id=...) from that button's redirect.
+const sessionId = new URLSearchParams(location.search).get('id');
+
+async function loadSession(id) {
+  return apiFetchJson(`/api/sessions/${id}`);
 }
 
 function renderSession(session) {
@@ -557,15 +554,22 @@ retryTranscriptBtn.addEventListener('click', async () => {
 // a host staring at a page that looks loaded but does nothing, with no
 // visible error. So this is caught, surfaced on-page, and retryable instead.
 async function initSession() {
+  if (!sessionId) {
+    joinCodeEl.textContent = '（缺少場次 id）';
+    sessionErrorTextEl.textContent = '缺少場次 id，請從「字幕間」清單點「回到控場」或「＋ 開新場次」進入這個頁面。';
+    sessionErrorEl.hidden = false;
+    return;
+  }
   try {
-    currentSession = await createSession();
+    currentSession = await loadSession(sessionId);
     renderSession(currentSession);
     sessionErrorEl.hidden = true;
     connectWs();
   } catch (err) {
-    console.error('Failed to create session:', err);
-    joinCodeEl.textContent = '（尚未建立）';
-    sessionErrorTextEl.textContent = `建立場次失敗：${err.message}`;
+    if (err.message === 'login_required') return; // already redirecting
+    console.error('Failed to load session:', err);
+    joinCodeEl.textContent = '（無法載入）';
+    sessionErrorTextEl.textContent = `載入場次失敗：${err.message}`;
     sessionErrorEl.hidden = false;
   }
 }

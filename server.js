@@ -26,6 +26,9 @@ import {
   dbGetUserById,
   dbGetSessionOwner,
   dbGetSessionsByUser,
+  dbGetSessionById,
+  dbDeleteSession,
+  dbDeleteAbandonedCreatedSessions,
   dbGetUserCredits,
   dbChargeCredits,
   dbCreateOrder,
@@ -397,7 +400,7 @@ const SESSION_CLEANUP_INTERVAL_MS = 30 * 60 * 1000;
 const ENDED_SESSION_TTL_MS = 2 * 60 * 60 * 1000;
 const ABANDONED_CREATED_SESSION_TTL_MS = 6 * 60 * 60 * 1000;
 
-function sweepStaleSessions() {
+async function sweepStaleSessions() {
   const now = Date.now();
   for (const [id, session] of sessions) {
     const stale =
@@ -408,8 +411,21 @@ function sweepStaleSessions() {
       sessionsByJoinCode.delete(session.joinCode);
     }
   }
+  // Extends the above to the DB layer: a never-started session otherwise
+  // lives in the `sessions` table forever (and keeps showing up in
+  // "字幕間"'s list as a zombie) even after its in-memory copy is swept.
+  // Same TTL as the in-memory branch above, on purpose — one "abandoned"
+  // definition, not two independently-tunable ones.
+  try {
+    const deleted = await dbDeleteAbandonedCreatedSessions(ABANDONED_CREATED_SESSION_TTL_MS);
+    if (deleted > 0) console.log(`[cleanup] deleted ${deleted} abandoned never-started session(s) from the DB`);
+  } catch (err) {
+    console.error('[cleanup] failed to delete abandoned sessions from the DB:', err);
+  }
 }
-setInterval(sweepStaleSessions, SESSION_CLEANUP_INTERVAL_MS).unref();
+setInterval(() => {
+  sweepStaleSessions().catch((err) => console.error('[cleanup] sweep failed:', err));
+}, SESSION_CLEANUP_INTERVAL_MS).unref();
 
 function getOrigin(req) {
   const proto = req.headers['x-forwarded-proto'] || (req.socket.encrypted ? 'https' : 'http');
@@ -541,6 +557,68 @@ app.get('/api/sessions', requireLoginApi, async (req, res) => {
     console.error(`[db] failed to list sessions for user ${req.user.id}:`, err);
     res.status(500).json({ error: 'Failed to list sessions' });
   }
+});
+
+// Single existing session's share info (SPEC fix: "進入 /host 就自動建場" was
+// creating a zombie `created` row on every page load/refresh — /host now
+// requires ?id=<sessionId> for a session created explicitly via the
+// "＋ 開新場次" button on 字幕間, and loads it here instead of calling POST
+// /api/sessions again). Ownership-gated like rename/transcript above.
+app.get('/api/sessions/:id', requireLoginApi, async (req, res) => {
+  const { id } = req.params;
+  if (!(await authorizeSessionOwner(req, res, id))) return;
+  let row;
+  try {
+    row = await dbGetSessionById(id);
+  } catch (err) {
+    console.error(`[db] failed to load session ${id}:`, err);
+    res.status(500).json({ error: 'Failed to load session' });
+    return;
+  }
+  if (!row) {
+    res.status(404).json({ error: 'session_not_found' });
+    return;
+  }
+  const viewerUrl = `${getOrigin(req)}/viewer2?code=${row.join_code}`;
+  let qrDataUrl = null;
+  try {
+    qrDataUrl = await QRCode.toDataURL(viewerUrl, { margin: 1, width: 320 });
+  } catch (err) {
+    console.error('QR code generation failed:', err);
+  }
+  res.status(200).json({ id: row.id, joinCode: row.join_code, name: row.name, status: row.status, viewerUrl, qrDataUrl });
+});
+
+// Deletes a session entirely (SPEC: "刪除場次" — the counterpart to the
+// "＋ 開新場次" button, for a never-used or fully-done-with session). Never
+// allowed while actually live — an already-started session's join_code and
+// connected viewers must survive (SPEC: "不要動 join_code 存續"); end it from
+// /host first. Ownership-gated the same way as the routes above.
+app.delete('/api/sessions/:id', requireLoginApi, async (req, res) => {
+  const { id } = req.params;
+  if (!(await authorizeSessionOwner(req, res, id))) return;
+  const liveSession = sessions.get(id);
+  if (liveSession && liveSession.status === 'live') {
+    res.status(409).json({ error: 'session_live' });
+    return;
+  }
+  let deleted;
+  try {
+    deleted = await dbDeleteSession(id, req.user.id);
+  } catch (err) {
+    console.error(`[db] failed to delete session ${id}:`, err);
+    res.status(500).json({ error: 'Failed to delete session' });
+    return;
+  }
+  if (!deleted) {
+    res.status(404).json({ error: 'session_not_found' });
+    return;
+  }
+  if (liveSession) {
+    sessions.delete(id);
+    sessionsByJoinCode.delete(liveSession.joinCode);
+  }
+  res.status(200).json({ id, deleted: true });
 });
 
 // Tells client-side code who (if anyone) is logged in. Identity is decided

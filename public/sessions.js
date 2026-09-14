@@ -15,6 +15,7 @@ const refreshBtn = document.getElementById('refreshBtn');
 const rowTemplate = document.getElementById('sessionRowTemplate');
 const creditsAmountEl = document.getElementById('creditsAmount');
 const filterChipsEl = document.getElementById('filterChips');
+const newSessionBtn = document.getElementById('newSessionBtn');
 
 function redirectToLogin() {
   location.href = `/auth/google?returnTo=${encodeURIComponent(location.pathname)}`;
@@ -55,6 +56,8 @@ function renderSessionRow(session) {
   const downloadBtn = node.querySelector('.downloadBtn');
   const retryBtn = node.querySelector('.retryBtn');
   const transcriptTextEl = node.querySelector('.transcriptText');
+  const deleteBtn = node.querySelector('.deleteBtn');
+  const openBtn = node.querySelector('.openBtn');
 
   row.dataset.status = session.status;
   nameInput.value = session.name || '';
@@ -126,6 +129,37 @@ function renderSessionRow(session) {
     }
   }
 
+  // Reopen /host for this exact session (created-but-not-started, or still
+  // live) — there is otherwise no way back in once the tab that created it
+  // is gone, since /host no longer creates a session on its own.
+  if (session.status === 'ended') {
+    openBtn.hidden = true;
+  } else {
+    openBtn.href = `/host?id=${encodeURIComponent(session.id)}`;
+  }
+
+  // Delete (SPEC: "刪除場次") — never offered for a currently-live session
+  // (the server also blocks it with 409; hiding it here just avoids
+  // surfacing a confusing error). A never-started session deletes instantly;
+  // an ended one (has real history) needs an explicit confirm first.
+  if (session.status === 'live') {
+    deleteBtn.hidden = true;
+  } else {
+    deleteBtn.addEventListener('click', async () => {
+      if (session.status === 'ended' && !confirm('這場已經有記錄，確定要刪除嗎？此動作無法復原。')) return;
+      deleteBtn.disabled = true;
+      try {
+        await apiFetchJson(`/api/sessions/${session.id}`, { method: 'DELETE' });
+        row.remove();
+      } catch (err) {
+        if (err.message === 'login_required') return;
+        console.error('Delete failed:', err);
+        alert(`刪除失敗：${err.message}`);
+        deleteBtn.disabled = false;
+      }
+    });
+  }
+
   return row;
 }
 
@@ -173,6 +207,24 @@ filterChipsEl.addEventListener('click', (e) => {
     chip.classList.toggle('is-active', chip === btn);
   }
   applyFilter();
+});
+
+// "＋ 開新場次" (SPEC fix: session creation is now an explicit action, not a
+// side effect of loading /host — that was the source of the zombie
+// `created` rows this whole flow is meant to fix). Creates the session here
+// and hands its id to /host, which loads that ONE session instead of
+// creating a new one on every page load.
+newSessionBtn.addEventListener('click', async () => {
+  newSessionBtn.disabled = true;
+  try {
+    const newSession = await apiFetchJson('/api/sessions', { method: 'POST' });
+    location.href = `/host?id=${encodeURIComponent(newSession.id)}`;
+  } catch (err) {
+    if (err.message === 'login_required') return;
+    console.error('Failed to create session:', err);
+    alert(`建立場次失敗：${err.message}`);
+    newSessionBtn.disabled = false;
+  }
 });
 
 async function loadCredits() {

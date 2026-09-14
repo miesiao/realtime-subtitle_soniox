@@ -8,7 +8,7 @@ fetch('/api/me', { credentials: 'same-origin' })
   .then((res) => (res.ok ? res.json() : null))
   .then((me) => {
     if (!me) return;
-    ctaBtn.textContent = '前往我的場次 →';
+    ctaBtn.textContent = '前往字幕間 →';
     ctaBtn.href = '/sessions';
   })
   .catch(() => {}); // stay on the default login link if this fails

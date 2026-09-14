@@ -284,6 +284,69 @@ export async function dbGetSessionsByUser(userId) {
   return result.rows;
 }
 
+// Full row for a single session, including join_code — used by GET
+// /api/sessions/:id so /host can render an EXISTING session's QR/join code
+// without ever creating a new one (see server.js's createSession comment on
+// the zombie-session fix).
+export async function dbGetSessionById(id) {
+  if (!dbReady()) return null;
+  const result = await pool.query(
+    `SELECT id, join_code, name, status, created_at, started_at, ended_at
+     FROM sessions WHERE id = $1`,
+    [id]
+  );
+  return result.rows[0] || null;
+}
+
+// Deletes a session and everything that references it (transcript_lines,
+// usage_ledger) — ownership-scoped (WHERE ... AND user_id = $2), so a host
+// can only delete their own session. usage_ledger is append-only/never-
+// deleted everywhere else in this file (SPEC step 6: "與扣點一致可追溯"); this
+// is the one deliberate exception, since deleting a session is supposed to
+// make every trace of it go away. Transactional so a never-started session
+// (no children) and an ended one with real history are both all-or-nothing.
+// Returns true if a session row was actually deleted (false = not found, or
+// not owned by this user).
+export async function dbDeleteSession(id, userId) {
+  if (!dbReady()) return false;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const owned = await client.query(`SELECT id FROM sessions WHERE id = $1 AND user_id = $2`, [id, userId]);
+    if (owned.rowCount === 0) {
+      await client.query('ROLLBACK');
+      return false;
+    }
+    await client.query(`DELETE FROM usage_ledger WHERE session_id = $1`, [id]);
+    await client.query(`DELETE FROM transcript_lines WHERE session_id = $1`, [id]);
+    await client.query(`DELETE FROM sessions WHERE id = $1`, [id]);
+    await client.query('COMMIT');
+    return true;
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+// Zombie-session cleanup, extended to the DB layer (previously
+// sweepStaleSessions in server.js only ever forgot these in-memory, leaving
+// the DB row — and therefore the "字幕間" list — with a dead entry forever).
+// A session that was created but never started has no transcript_lines/
+// usage_ledger rows yet (both are only ever written after Start), so this is
+// always a safe plain delete with nothing to cascade. Ended sessions are
+// deliberately never touched here — only their in-memory copy ever expires
+// (see ENDED_SESSION_TTL_MS) — the DB row + transcript stay forever.
+export async function dbDeleteAbandonedCreatedSessions(olderThanMs) {
+  if (!dbReady()) return 0;
+  const result = await pool.query(
+    `DELETE FROM sessions WHERE status = 'created' AND created_at < now() - ($1 || ' milliseconds')::interval`,
+    [olderThanMs]
+  );
+  return result.rowCount;
+}
+
 // --- transcript_lines ---------------------------------------------------
 
 export async function dbInsertTranscriptLine(sessionId, seq, ts, originalText) {
