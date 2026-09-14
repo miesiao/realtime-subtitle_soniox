@@ -189,6 +189,20 @@ function currentRequiredCreditsPerMinute() {
 topupToggleBtn.addEventListener('click', () => {
   topupPanelEl.hidden = !topupPanelEl.hidden;
 });
+// Dialog chrome (design 2h): a dedicated close button and a click on the
+// backdrop itself (but not the card) both just hide the same panel — same
+// mechanism topupToggleBtn already uses above, no new state.
+document.getElementById('closeTopupBtn')?.addEventListener('click', () => {
+  topupPanelEl.hidden = true;
+});
+topupPanelEl.addEventListener('click', (e) => {
+  if (e.target === topupPanelEl) topupPanelEl.hidden = true;
+});
+// The low-balance banner's shortcut button opens the same top-up panel as
+// the top bar's 儲值 button.
+document.getElementById('lowBalanceTopupBtn')?.addEventListener('click', () => {
+  topupPanelEl.hidden = false;
+});
 
 for (const btn of topupTierBtns) {
   btn.addEventListener('click', async () => {

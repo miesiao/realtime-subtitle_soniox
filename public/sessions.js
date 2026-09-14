@@ -13,6 +13,8 @@ const listBodyEl = document.getElementById('listBody');
 const listStatusEl = document.getElementById('listStatus');
 const refreshBtn = document.getElementById('refreshBtn');
 const rowTemplate = document.getElementById('sessionRowTemplate');
+const creditsAmountEl = document.getElementById('creditsAmount');
+const filterChipsEl = document.getElementById('filterChips');
 
 function redirectToLogin() {
   location.href = `/auth/google?returnTo=${encodeURIComponent(location.pathname)}`;
@@ -54,9 +56,12 @@ function renderSessionRow(session) {
   const retryBtn = node.querySelector('.retryBtn');
   const transcriptTextEl = node.querySelector('.transcriptText');
 
+  row.dataset.status = session.status;
   nameInput.value = session.name || '';
   statusBadge.textContent = STATUS_LABELS[session.status] || session.status;
+  statusBadge.dataset.status = session.status;
   processingBadge.textContent = PROCESSING_LABELS[session.processingStatus] || '';
+  processingBadge.dataset.processing = session.processingStatus || '';
   createdAtEl.textContent = formatDate(session.createdAt);
 
   renameBtn.addEventListener('click', async () => {
@@ -146,17 +151,50 @@ async function loadSessions() {
   }
 }
 
-refreshBtn.addEventListener('click', loadSessions);
+refreshBtn.addEventListener('click', async () => {
+  await loadSessions();
+  applyFilter();
+});
+
+// --- Filter chips (全部/進行中/已結束) — purely client-side over rows already
+// rendered by loadSessions; each row carries its own status via
+// row.dataset.status (set in renderSessionRow above).
+let activeFilter = 'all';
+function applyFilter() {
+  for (const row of listBodyEl.querySelectorAll('.session-row')) {
+    row.hidden = activeFilter !== 'all' && row.dataset.status !== activeFilter;
+  }
+}
+filterChipsEl.addEventListener('click', (e) => {
+  const btn = e.target.closest('.filter-chip');
+  if (!btn) return;
+  activeFilter = btn.dataset.filter;
+  for (const chip of filterChipsEl.querySelectorAll('.filter-chip')) {
+    chip.classList.toggle('is-active', chip === btn);
+  }
+  applyFilter();
+});
+
+async function loadCredits() {
+  try {
+    const { credits } = await apiFetchJson('/api/credits');
+    creditsAmountEl.textContent = credits;
+  } catch (err) {
+    if (err.message === 'login_required') return; // already redirecting
+    creditsAmountEl.textContent = '—';
+  }
+}
 
 async function init() {
   try {
     const me = await apiFetchJson('/api/me');
-    whoAmIEl.textContent = `登入身分：${me.name || me.email || me.id}`;
+    whoAmIEl.textContent = me.name || me.email || me.id;
   } catch (err) {
     if (err.message === 'login_required') return; // already redirecting
     whoAmIEl.textContent = `無法確認登入狀態：${err.message}`;
   }
-  await loadSessions();
+  await Promise.all([loadSessions(), loadCredits()]);
+  applyFilter();
 }
 
 init();

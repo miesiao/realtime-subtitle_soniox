@@ -2,155 +2,160 @@
 <html lang="zh-Hant">
 <head>
 <meta charset="utf-8" />
-<title>翻譯字幕系統（試營運）</title>
-<link rel="stylesheet" href="/style.css" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>開場 — Subtii</title>
+<link rel="stylesheet" href="/ds.css" />
+<link rel="stylesheet" href="/host.css" />
 </head>
-<body>
-  <div id="hostDisconnectBanner">⚠ 與伺服器斷線！所有觀眾目前收不到新字幕 — 正在自動重新連接…</div>
-  <div id="creditsPausedBanner" class="warn-banner" hidden>⚠ 點數已用盡，本場已自動暫停（join code 與觀眾連線不受影響）。請儲值後按 Start 繼續本場。</div>
-  <div id="lowBalanceBanner" class="warn-banner low" hidden>⚠ 點數即將用盡（剩約 <span id="lowBalanceMinutes">?</span> 分鐘可用），請儘快儲值，避免中途暫停。</div>
+<body class="theme-dark">
+  <div id="hostDisconnectBanner" class="alert-banner alert-banner--loud">⚠ 與伺服器斷線！所有觀眾目前收不到新字幕 — 正在自動重新連接…</div>
 
-  <header>
-    <h1>翻譯字幕系統（試營運）</h1>
-  </header>
-
-  <section class="session-info">
-    <div class="session-info-row">
-      <span id="whoAmI">登入狀態確認中…</span>
-      <a href="/sessions">我的場次 ↗</a>
+  <header class="host-topbar">
+    <div class="host-topbar-row">
+      <a href="/sessions" class="m text-muted">我的場次 /</a>
+      <input id="sessionNameInput" class="input session-name-input" type="text" placeholder="（未命名）" />
+      <button id="renameBtn" type="button" class="btn btn-secondary btn-sm">改名</button>
+      <span id="renameStatus" class="m text-muted"></span>
+      <span class="host-topbar-spacer"></span>
+      <span id="wsStatus" class="m">ws: connecting…</span>
+      <span id="viewerCount" class="m text-muted">viewers: 0</span>
+      <span class="m credits-chip">餘額 <strong id="creditsDisplay">…</strong> 點</span>
+      <button id="topupToggleBtn" type="button" class="btn btn-secondary btn-sm">儲值</button>
+    </div>
+    <div class="host-topbar-row host-topbar-row--sub">
+      <span id="whoAmI" class="m text-muted">登入狀態確認中…</span>
       <a href="/auth/logout">登出</a>
     </div>
-    <div class="session-info-row">
-      <span>場次代碼 join code：<code id="joinCode">…</code></span>
-      <a id="viewerLink" href="#" target="_blank" rel="noopener">開啟觀眾頁 ↗</a>
-    </div>
-    <div class="session-info-row">
-      <label for="sessionNameInput">場次名稱</label>
-      <input id="sessionNameInput" type="text" placeholder="（未命名）" />
-      <button id="renameBtn" type="button">改名</button>
-      <span id="renameStatus" class="status"></span>
-    </div>
-    <img id="qrImg" alt="掃碼加入觀眾頁" hidden />
-    <div id="sessionError" class="session-error" hidden>
-      <span id="sessionErrorText"></span>
-      <button id="retrySessionBtn" type="button">重試</button>
-    </div>
-  </section>
+  </header>
 
-  <section class="billing">
-    <div class="session-info-row">
-      <span>點數餘額：<strong id="creditsDisplay">…</strong> 點</span>
-      <button id="topupToggleBtn" type="button">儲值</button>
-    </div>
-    <div id="topupPanel" hidden>
-      <div class="topup-tiers">
-        <button type="button" class="topup-tier-btn" data-tier="300">儲值300元 → 300點</button>
-        <button type="button" class="topup-tier-btn" data-tier="500">儲值500元 → 530點</button>
-        <button type="button" class="topup-tier-btn" data-tier="1000">儲值1000元 → 1100點</button>
+  <div id="creditsPausedBanner" class="alert-banner alert-banner--loud" hidden>⚠ 點數已用盡，本場已自動暫停（join code 與觀眾連線不受影響）。請儲值後按 Start 繼續本場。</div>
+  <div id="lowBalanceBanner" class="alert-banner alert-banner--low" hidden>
+    <span>⚠ 點數即將用盡（剩約 <span id="lowBalanceMinutes">?</span> 分鐘可用），請儘快儲值，避免中途暫停。</span>
+    <button id="lowBalanceTopupBtn" type="button" class="btn btn-sm">前往儲值</button>
+  </div>
+  <div id="sessionError" class="alert-banner alert-banner--low" hidden>
+    <span id="sessionErrorText"></span>
+    <button id="retrySessionBtn" type="button" class="btn btn-sm">重試</button>
+  </div>
+
+  <div class="control-row">
+    <button id="startBtn" class="btn btn-primary control-btn">Start</button>
+    <button id="stopBtn" class="btn btn-secondary control-btn" disabled>暫停 Pause</button>
+    <button id="clearBtn" class="btn btn-secondary">清空 Clear</button>
+    <span id="status" class="m status-text">idle</span>
+    <button id="endSessionBtn" class="btn control-end">結束本場 End Session</button>
+  </div>
+
+  <main class="host-grid">
+    <section class="host-col host-col--share">
+      <h6 class="text-muted">分享給聽眾</h6>
+      <div class="qr-wrap"><img id="qrImg" alt="掃碼加入觀眾頁" hidden /></div>
+      <div class="m text-muted join-code-label">join code</div>
+      <div class="m join-code" id="joinCode">…</div>
+      <a id="viewerLink" class="m viewer-link" href="#" target="_blank" rel="noopener"></a>
+    </section>
+
+    <section class="host-col host-col--monitor">
+      <h6 class="text-muted">監看 · 聽眾實際看到的</h6>
+      <div id="columnsMain" class="columns">
+        <div class="pane">
+          <div class="pane-header"><span>原文 (original)</span><span id="originalScript" class="script-badge"></span></div>
+          <div id="originalText" class="pane-body"></div>
+        </div>
+        <div id="translationPaneWrap" class="pane">
+          <div class="pane-header"><span>譯文 (translation)</span><span id="translationScript" class="script-badge"></span></div>
+          <div id="translationText" class="pane-body"></div>
+        </div>
       </div>
-      <div id="orderInfo" hidden>
-        <p>訂單編號：<code id="orderIdText"></code></p>
-        <p>請匯款 <strong id="orderAmountText"></strong> 元至：<br />808 玉山銀行 民權分行 / 南隅有限公司 / 0598-940-168796</p>
-        <p>轉帳完成後，請回填帳號後五碼以便核對入帳：</p>
-        <label class="session-info-row">
-          後五碼
-          <input id="lastFiveInput" type="text" inputmode="numeric" maxlength="5" placeholder="12345" />
-          <button id="submitLastFiveBtn" type="button">送出</button>
+      <div class="sent-log-wrap">
+        <div class="m text-muted sent-log-label">已送出給觀眾的 utterance（每段 endpoint 定稿時送一次）</div>
+        <div id="sentLog" class="pane-body sent-log"></div>
+      </div>
+    </section>
+
+    <section id="settingsPanel" class="host-col host-col--settings">
+      <div class="settings-head">
+        <h6 class="text-muted">開場前設定</h6>
+        <span class="tag tag-neutral lock-tag">開播中已鎖定</span>
+      </div>
+
+      <label class="translate-toggle">
+        <input type="checkbox" id="translateEnabled" checked />
+        啟用翻譯
+      </label>
+
+      <div id="targetLangWrap" class="field">
+        <label for="targetLang">目標語言 (target_language)</label>
+        <select id="targetLang" class="input">
+          <option value="zh">中文 (zh)</option>
+          <option value="en">English (en)</option>
+        </select>
+      </div>
+
+      <div class="field">
+        <label>來源語言 (language_hints)</label>
+        <div id="commonLangs" class="lang-chip-row"></div>
+        <label class="auto-detect-toggle">
+          <input type="checkbox" id="autoDetectLang" />
+          自動偵測（不指定語言，準確度可能較低）
         </label>
-        <span id="orderStatusText" class="status"></span>
+        <details id="moreLangsDetails">
+          <summary>更多語言 ▾</summary>
+          <input type="search" id="moreLangSearch" class="input" placeholder="搜尋語言（中/英文名稱或代碼）…" />
+          <div id="moreLangs" class="lang-chip-row"></div>
+        </details>
+        <div id="sourceLangError" class="alert-text" hidden>請至少選擇一種來源語言，或選擇自動偵測</div>
       </div>
-    </div>
-  </section>
 
-  <section id="transcriptSection" class="pane" style="margin-top:16px;" hidden>
-    <div class="pane-header">
-      <span>散場整理</span>
-      <span id="transcriptStatus" class="script-badge"></span>
-    </div>
-    <div class="pane-body" style="min-height:60px; font-size:14px;">
-      <button id="retryTranscriptBtn" type="button" hidden>重新整理</button>
-      <button id="downloadTranscriptBtn" type="button" hidden>下載逐字稿 (.txt)</button>
-      <pre id="transcriptText" style="white-space:pre-wrap; margin-top:8px;"></pre>
-    </div>
-  </section>
-
-  <section class="source-lang">
-    <div class="source-lang-header">來源語言 (language_hints)</div>
-    <div id="commonLangs" class="lang-checkboxes"></div>
-    <label class="auto-detect-toggle">
-      <input type="checkbox" id="autoDetectLang" />
-      自動偵測（不指定語言，準確度可能較低）
-    </label>
-    <details id="moreLangsDetails">
-      <summary>更多語言 ▾</summary>
-      <input type="search" id="moreLangSearch" placeholder="搜尋語言（中/英文名稱或代碼）…" />
-      <div id="moreLangs" class="lang-checkboxes"></div>
-    </details>
-    <div id="sourceLangError" class="session-error" hidden>
-      <span>請至少選擇一種來源語言，或選擇自動偵測</span>
-    </div>
-  </section>
-
-  <section class="controls">
-    <label class="translate-toggle">
-      <input type="checkbox" id="translateEnabled" checked />
-      啟用翻譯
-    </label>
-    <label id="targetLangWrap">
-      目標語言 (target_language)
-      <select id="targetLang">
-        <option value="zh">中文 (zh)</option>
-        <option value="en">English (en)</option>
-      </select>
-    </label>
-
-    <div class="buttons">
-      <button id="startBtn">Start</button>
-      <button id="stopBtn" disabled>暫停 Pause</button>
-      <button id="clearBtn">清空 Clear</button>
-      <button id="endSessionBtn">結束本場 End Session</button>
-    </div>
-
-    <span id="status" class="status">idle</span>
-    <span id="wsStatus" class="status">ws: connecting…</span>
-    <span id="viewerCount" class="status">viewers: 0</span>
-  </section>
-
-  <section class="terms">
-    <label for="terms">context.terms（詞彙/領域提示，換行或逗號分隔，Start 前設定）</label>
-    <textarea id="terms" rows="2" placeholder="例：Soniox, WebSocket, 即時字幕"></textarea>
-  </section>
-
-  <main id="columnsMain" class="columns">
-    <div class="pane">
-      <div class="pane-header">
-        <span>原文 (original)</span>
-        <span id="originalScript" class="script-badge"></span>
+      <div class="field">
+        <label for="terms">context.terms（詞彙/領域提示，換行或逗號分隔，Start 前設定）</label>
+        <textarea id="terms" class="input" rows="3" placeholder="例：Soniox, WebSocket, 即時字幕"></textarea>
       </div>
-      <div id="originalText" class="pane-body"></div>
-    </div>
-    <div id="translationPaneWrap" class="pane">
-      <div class="pane-header">
-        <span>譯文 (translation)</span>
-        <span id="translationScript" class="script-badge"></span>
-      </div>
-      <div id="translationText" class="pane-body"></div>
-    </div>
+    </section>
   </main>
 
-  <section class="pane" style="margin-top:16px;">
-    <div class="pane-header"><span>已送出給觀眾的 utterance（每段 endpoint 定稿時送一次）</span></div>
-    <div id="sentLog" class="pane-body" style="min-height:120px; font-size:14px;"></div>
+  <section id="transcriptSection" class="transcript-section" hidden>
+    <div class="transcript-head"><span>散場整理</span><span id="transcriptStatus" class="tag tag-neutral"></span></div>
+    <div class="transcript-actions">
+      <button id="retryTranscriptBtn" type="button" class="btn btn-secondary" hidden>重新整理</button>
+      <button id="downloadTranscriptBtn" type="button" class="btn btn-secondary" hidden>下載逐字稿 (.txt)</button>
+    </div>
+    <pre id="transcriptText" class="transcript-text"></pre>
   </section>
 
   <footer class="legend">
-    <span class="legend-title">語言顏色：</span>
+    <span class="text-muted">語言顏色：</span>
     <span class="lang-chip lang-zh">zh</span>
     <span class="lang-chip lang-en">en</span>
     <span class="lang-chip lang-es">es</span>
     <span class="lang-chip lang-other">other</span>
-    <span class="endpoint-legend">| <span class="endpoint-marker">⏸</span> = endpoint detected → 該段送出</span>
+    <span class="text-muted">| <span class="endpoint-marker">⏸</span> = endpoint detected → 該段送出</span>
   </footer>
+
+  <div id="topupPanel" hidden>
+    <div class="dialog">
+      <div class="dialog-title">儲值</div>
+      <div class="topup-tiers">
+        <button type="button" class="btn btn-secondary topup-tier-btn" data-tier="300">儲值300元 → 300點</button>
+        <button type="button" class="btn btn-secondary topup-tier-btn" data-tier="500">儲值500元 → 530點</button>
+        <button type="button" class="btn btn-secondary topup-tier-btn" data-tier="1000">儲值1000元 → 1100點</button>
+      </div>
+      <div id="orderInfo" class="dialog-body" hidden>
+        <p>訂單編號：<code id="orderIdText"></code></p>
+        <p>請匯款 <strong id="orderAmountText"></strong> 元至：<br />808 玉山銀行 民權分行 / 南隅有限公司 / 0598-940-168796</p>
+        <p>轉帳完成後，請回填帳號後五碼以便核對入帳：</p>
+        <div class="topup-lastfive-row">
+          <label for="lastFiveInput">後五碼</label>
+          <input id="lastFiveInput" class="input" type="text" inputmode="numeric" maxlength="5" placeholder="12345" />
+          <button id="submitLastFiveBtn" type="button" class="btn btn-primary">送出</button>
+        </div>
+        <span id="orderStatusText" class="m text-muted"></span>
+      </div>
+      <div class="dialog-actions">
+        <button type="button" id="closeTopupBtn" class="btn btn-secondary">關閉</button>
+      </div>
+    </div>
+  </div>
 
   <script type="module" src="/host.js"></script>
 </body>

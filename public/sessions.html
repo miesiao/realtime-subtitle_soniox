@@ -2,49 +2,69 @@
 <html lang="zh-Hant">
 <head>
 <meta charset="utf-8" />
-<title>我的場次 — 即時字幕</title>
-<link rel="stylesheet" href="/style.css" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>我的場次 — Subtii</title>
+<link rel="stylesheet" href="/ds.css" />
+<link rel="stylesheet" href="/sessions.css" />
 </head>
-<body>
-  <header>
-    <h1>我的場次</h1>
-    <div class="model-info">登入身分決定看得到哪些場次；只有你自己開的場次會出現在這裡。</div>
-  </header>
+<body class="theme-dark">
+  <nav class="nav">
+    <span class="nav-brand brand-lockup">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <span class="brand-name">Subtii</span>
+    </span>
+    <a href="/host">開新場次</a>
+    <a href="/host">儲值</a>
+    <span id="whoAmI" class="m text-muted nav-whoami">登入狀態確認中…</span>
+    <a href="/auth/logout">登出</a>
+  </nav>
 
-  <section class="session-info">
-    <div class="session-info-row">
-      <span id="whoAmI">登入狀態確認中…</span>
-      <a href="/host">開新場次 ↗</a>
-      <a href="/auth/logout">登出</a>
+  <main class="sessions-main">
+    <div class="summary-row">
+      <div class="card summary-card">
+        <div class="m text-muted summary-label">點數餘額</div>
+        <div class="summary-amount"><span id="creditsAmount">…</span> <span class="summary-unit">點</span></div>
+      </div>
+      <a href="/host" class="card summary-cta">
+        <div class="summary-cta-title">開新場次</div>
+        <div class="text-muted summary-cta-sub">設語言 → 拿 QR → 開播</div>
+      </a>
     </div>
-  </section>
 
-  <section id="listSection" class="pane" style="margin-top:16px;">
-    <div class="pane-header">
-      <span>場次清單</span>
-      <button id="refreshBtn" type="button">重新整理清單</button>
-    </div>
-    <div id="listBody" class="pane-body session-list">
-      <div id="listStatus" class="status">載入中…</div>
-    </div>
-  </section>
+    <section class="list-section">
+      <div class="list-toolbar">
+        <span class="m text-muted list-count">場次清單</span>
+        <div id="filterChips" class="filter-chips">
+          <button type="button" class="filter-chip is-active" data-filter="all">全部</button>
+          <button type="button" class="filter-chip" data-filter="live">進行中</button>
+          <button type="button" class="filter-chip" data-filter="ended">已結束</button>
+        </div>
+        <button id="refreshBtn" type="button" class="btn btn-secondary">重新整理</button>
+      </div>
+      <div id="listBody" class="session-list">
+        <div id="listStatus" class="status text-muted">載入中…</div>
+      </div>
+    </section>
+  </main>
 
   <template id="sessionRowTemplate">
     <div class="session-row">
-      <div class="session-row-main">
-        <input class="session-name-input" type="text" />
-        <button class="renameBtn" type="button">改名</button>
-        <span class="renameStatus status"></span>
+      <div class="session-row-top">
+        <span class="tag statusBadge"></span>
+        <span class="tag processingBadge"></span>
+        <span class="createdAt m text-muted"></span>
       </div>
-      <div class="session-row-meta">
-        <span class="statusBadge script-badge"></span>
-        <span class="processingBadge script-badge"></span>
-        <span class="createdAt status"></span>
+      <div class="session-row-name">
+        <input class="input session-name-input" type="text" placeholder="（未命名）" />
+        <button class="btn btn-secondary renameBtn" type="button">改名</button>
+        <span class="renameStatus text-muted"></span>
       </div>
       <div class="session-row-transcript" hidden>
-        <button class="downloadBtn" type="button" hidden>下載逐字稿 (.txt)</button>
-        <button class="retryBtn" type="button" hidden>重新整理</button>
         <pre class="transcriptText"></pre>
+        <div class="session-row-transcript-actions">
+          <button class="btn btn-secondary downloadBtn" type="button" hidden>下載逐字稿 (.txt)</button>
+          <button class="btn btn-secondary retryBtn" type="button" hidden>重新整理</button>
+        </div>
       </div>
     </div>
   </template>

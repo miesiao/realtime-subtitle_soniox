@@ -1011,7 +1011,7 @@ wss.on('connection', (ws) => {
         session.viewers.add(ws);
         console.log(`[viewer+] session=${session.id} total=${session.viewers.size}`);
         sendViewerCount(session);
-        send(ws, { type: 'session_status', status: session.status, targetLangs: session.targetLangs });
+        send(ws, { type: 'session_status', status: session.status, targetLangs: session.targetLangs, name: session.name });
         if (session.status === 'live') {
           send(ws, { type: 'backfill', utterances: session.history.slice(-BACKFILL_COUNT) });
         }
@@ -1085,7 +1085,7 @@ wss.on('connection', (ws) => {
       // join time AND on every subsequent broadcast — see targetLangs
       // comment on the session object) and for the DB record (SPEC §6.5).
       session.targetLangs = wantsTargetLangs;
-      broadcastToViewers(session, { type: 'session_status', status: 'live', targetLangs: session.targetLangs });
+      broadcastToViewers(session, { type: 'session_status', status: 'live', targetLangs: session.targetLangs, name: session.name });
       if (firstStart) {
         dbMarkSessionLive(session.id).catch((err) => {
           console.error(`[db] failed to mark session ${session.id} live:`, err);
@@ -1122,7 +1122,7 @@ wss.on('connection', (ws) => {
         session.status = 'ended';
         session.endedAt = Date.now();
         console.log(`[session ${session.id}] ended`);
-        broadcastToViewers(session, { type: 'session_status', status: 'ended' });
+        broadcastToViewers(session, { type: 'session_status', status: 'ended', name: session.name });
         session.viewers.clear();
         session.hostWs = null;
 

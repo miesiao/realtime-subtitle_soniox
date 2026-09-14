@@ -1,0 +1,61 @@
+/* My sessions (design 2f desktop / 2g mobile), dark cockpit theme. */
+
+body.theme-dark { min-height: 100vh; }
+
+.nav a { color: color-mix(in srgb, var(--color-text) 75%, transparent); }
+.nav-whoami { margin-left: var(--space-2); }
+
+.sessions-main { max-width: 1180px; margin: 0 auto; padding: var(--space-6) var(--space-4) var(--space-8); }
+
+.summary-row { display: grid; grid-template-columns: 1fr 1fr; gap: 2px; background: var(--color-divider); margin-bottom: var(--space-6); }
+.summary-card, .summary-cta {
+  background: var(--color-surface); padding: var(--space-6);
+  border-radius: 0; text-decoration: none; color: inherit;
+}
+.summary-label { font-size: 11px; letter-spacing: 0.08em; }
+.summary-amount { font-size: 38px; font-weight: 800; line-height: 1.1; margin-top: var(--space-2); }
+.summary-unit { font-size: 15px; font-weight: 400; color: color-mix(in srgb, var(--color-text) 60%, transparent); }
+.summary-cta { display: flex; flex-direction: column; justify-content: space-between; background: var(--color-accent-700); color: var(--color-bg); }
+.summary-cta:hover { background: var(--color-accent-600); }
+.summary-cta-title { font-size: 22px; font-weight: 800; line-height: 1.2; }
+.summary-cta-sub { font-size: 13px; color: var(--color-bg); opacity: 0.85; margin-top: var(--space-2); }
+
+.list-toolbar { display: flex; align-items: center; gap: var(--space-3); margin-bottom: var(--space-4); flex-wrap: wrap; }
+.list-count { font-size: 11px; letter-spacing: 0.08em; margin-right: auto; }
+.filter-chips { display: flex; gap: var(--space-2); }
+.filter-chip {
+  font-family: var(--font-body); font-size: 13px; padding: 5px 12px; cursor: pointer;
+  background: none; border: 1px solid var(--color-divider); color: color-mix(in srgb, var(--color-text) 75%, transparent);
+}
+.filter-chip.is-active { background: var(--color-accent); border-color: var(--color-accent); color: var(--color-bg); font-weight: 600; }
+
+.session-list { display: flex; flex-direction: column; }
+.status { padding: var(--space-4) 0; }
+
+.session-row { display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-4) 0; border-bottom: 1px solid var(--color-divider); }
+.session-row[hidden] { display: none; }
+.session-row-top { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
+.tag:empty { display: none; }
+.statusBadge[data-status="live"] { background: var(--color-accent); color: var(--color-bg); }
+.statusBadge[data-status="created"] { background: var(--color-neutral-700); color: var(--color-neutral-100); }
+.statusBadge[data-status="ended"] { background: var(--color-neutral-700); color: var(--color-neutral-300); }
+.processingBadge[data-processing="ready"] { border: 1px solid var(--color-accent-400); color: var(--color-accent-400); background: none; }
+.processingBadge[data-processing="processing"] { background: var(--color-neutral-800); color: var(--color-neutral-100); }
+.processingBadge[data-processing="failed"] { background: var(--color-accent-700); color: var(--color-bg); }
+.createdAt { margin-left: auto; }
+
+.session-row-name { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
+.session-name-input { max-width: 320px; font-weight: 600; }
+.renameStatus { font-size: 12px; }
+
+.session-row-transcript { display: flex; flex-direction: column; gap: var(--space-2); align-items: flex-start; background: var(--color-surface); padding: var(--space-3); }
+.session-row-transcript .transcriptText { white-space: pre-wrap; font-size: 13px; margin: 0; }
+.session-row-transcript-actions { display: flex; gap: var(--space-2); }
+
+@media (max-width: 720px) {
+  .nav a:not(:last-child) { display: none; }
+  .sessions-main { padding: var(--space-4); }
+  .summary-row { grid-template-columns: 1fr; }
+  .list-toolbar { flex-direction: column; align-items: stretch; }
+  .list-count { margin-right: 0; }
+}

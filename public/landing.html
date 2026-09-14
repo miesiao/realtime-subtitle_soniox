@@ -2,17 +2,128 @@
 <html lang="zh-Hant">
 <head>
 <meta charset="utf-8" />
-<title>隨時有字幕</title>
-<link rel="stylesheet" href="/style.css" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Subtii 開字幕</title>
+<link rel="stylesheet" href="/ds.css" />
+<link rel="stylesheet" href="/landing.css" />
 </head>
-<body class="landing-body">
-  <main class="landing-hero">
-    <h1 class="landing-title">隨時有字幕</h1>
-    <p class="landing-tagline">開一場就有即時字幕與翻譯，聽眾掃 QR 碼就能看，不用裝 App。</p>
-    <div class="landing-cta">
-      <a id="ctaBtn" class="landing-btn" href="/auth/google?returnTo=/sessions">使用 Google 登入 / 註冊</a>
-    </div>
-    <p class="landing-footnote"><a href="/single">技術測試頁 →</a></p>
+<body>
+  <nav class="nav">
+    <span class="nav-brand brand-lockup">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <span class="brand-name">Subtii</span>
+      <span class="brand-suffix">開字幕</span>
+    </span>
+    <a href="#how">運作方式</a>
+    <a href="#pricing">定價</a>
+    <a href="/auth/google?returnTo=/sessions" class="btn btn-primary nav-cta">使用 Google 登入</a>
+  </nav>
+
+  <main>
+    <section class="hero">
+      <div class="hero-copy">
+        <h1>場上有一半的人，<span>其實沒聽懂。</span></h1>
+        <p class="hero-sub">Subtii 把講者的話即時轉成字幕與翻譯。聽眾掃一次 QR 就開始看，不安裝、不註冊、不付費。散場後系統整理好逐字稿，交還給你。</p>
+        <div class="hero-cta-row">
+          <a id="ctaBtn" class="btn btn-primary hero-cta" href="/auth/google?returnTo=/sessions">使用 Google 登入，開第一場</a>
+          <span class="tag tag-accent">加入即贈 50 點試用</span>
+        </div>
+        <div class="m hero-trust">
+          <span>聽眾零安裝</span><span>/</span><span>不綁月費</span><span>/</span><span>散場留逐字稿</span>
+        </div>
+      </div>
+      <div class="hero-preview">
+        <h6 class="text-muted">聽眾手機上看到的</h6>
+        <div class="preview-card">
+          <div class="preview-topbar">
+            <span class="m preview-live">● LIVE</span>
+            <span class="m text-muted">A− 100% A+</span>
+          </div>
+          <div class="preview-body">
+            <div class="preview-original">大家安靜一下，我們開始了。</div>
+            <div class="preview-translation">Everyone, let's get started.<span class="caret"></span></div>
+          </div>
+        </div>
+        <div class="m text-muted preview-note">原文小、譯文大；聽眾可關掉原文、自行放大字級</div>
+      </div>
+    </section>
+
+    <section class="usecases">
+      <div class="usecase-card">
+        <h4>博物館與古蹟導覽</h4>
+        <p>一位導覽員，同時服務講中文與講英文的參觀者。不用再分團、不用租耳機。</p>
+      </div>
+      <div class="usecase-card">
+        <h4>公開講座與研討會</h4>
+        <p>投影片外的口頭補充也留得下來。後排、聽障與外籍聽眾都跟得上。</p>
+      </div>
+      <div class="usecase-card">
+        <h4>企業說明會</h4>
+        <p>海外同事與客戶用自己的語言看同一場。散場逐字稿直接變會議紀錄。</p>
+      </div>
+    </section>
+
+    <section id="how" class="how">
+      <h6 class="text-muted">運作方式</h6>
+      <div class="how-steps">
+        <div class="how-step">
+          <div class="m step-num">01</div>
+          <h4>建立場次</h4>
+          <p>選純轉錄或翻譯、設來源與目標語言。系統給你一組 join code 與 QR，可印、可投影。</p>
+        </div>
+        <div class="how-step">
+          <div class="m step-num">02</div>
+          <h4>開播，開始講</h4>
+          <p>聽眾掃碼就看到字幕。中場暫停不換連結，續播時聽眾無感。</p>
+        </div>
+        <div class="how-step">
+          <div class="m step-num">03</div>
+          <h4>散場留逐字稿</h4>
+          <p>結束後自動整理成逐字稿，只有你看得到，可在「我的場次」回看與下載。</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="pricing" class="pricing">
+      <div class="pricing-head">
+        <h6 class="text-muted">定價 · 儲值制</h6>
+      </div>
+      <div class="pricing-tiers">
+        <div class="pricing-tier">
+          <div class="m text-muted">付 NT$300</div>
+          <div class="pricing-amount">300 <span>點</span></div>
+        </div>
+        <div class="pricing-tier pricing-tier--featured">
+          <div class="pricing-tier-head"><span class="m text-muted">付 NT$500</span><span class="tag tag-accent">多送 30 點</span></div>
+          <div class="pricing-amount">530 <span>點</span></div>
+        </div>
+        <div class="pricing-tier">
+          <div class="pricing-tier-head"><span class="m text-muted">付 NT$1,000</span><span class="tag tag-neutral">多送 100 點</span></div>
+          <div class="pricing-amount">1,100 <span>點</span></div>
+        </div>
+      </div>
+      <div class="pricing-detail">
+        <div class="pricing-formula">
+          <div class="m formula">每分鐘 = (2 + 目標語言數) 點</div>
+          <p>即時扣點。點數見底會自動暫停（不是結束），補點後接著講。</p>
+        </div>
+        <table class="table pricing-table">
+          <tbody>
+            <tr><td>60 分鐘純轉錄</td><td class="m" style="text-align:right">120 點</td></tr>
+            <tr><td>60 分鐘 ＋ 1 種譯文</td><td class="m" style="text-align:right">180 點</td></tr>
+            <tr><td>60 分鐘 ＋ 3 種譯文</td><td class="m" style="text-align:right">300 點</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="closer">
+      <h2>下一場活動，讓每個人都聽得懂。</h2>
+      <div class="closer-row">
+        <a href="/auth/google?returnTo=/sessions" class="btn closer-btn">使用 Google 登入</a>
+        <span class="closer-note">加入即贈 50 點，先試一場再儲值。</span>
+      </div>
+    </section>
   </main>
 
   <script type="module" src="/landing.js"></script>

@@ -18,19 +18,79 @@ const translationContentEl = document.getElementById('translationContent');
 const zoomOutBtn = document.getElementById('zoomOutBtn');
 const zoomInBtn = document.getElementById('zoomInBtn');
 const zoomLevelEl = document.getElementById('zoomLevel');
+const themeToggleBtn = document.getElementById('themeToggleBtn');
 
 // --- Session join_code (SPEC §3): the capability-based ticket from the QR
 // link/URL — "?code=xxx-xxxx-xxx". No code, no session; the overlay covers
 // the feed the whole time and the WS layer never even connects.
 const joinCode = new URLSearchParams(location.search).get('code');
 
-function showSessionOverlay(text) {
-  sessionOverlayEl.textContent = text;
+// --- Session overlay (design 2d/3d): a small branded card while there's
+// nothing a viewer is allowed to see yet — no code, invalid code, not
+// started, or ended. The brand mark only ever appears here: once captions
+// are live the overlay is hidden and the top bar stays brand-free (3d).
+function showSessionOverlay({ tag, tagClass = 'tag-accent', title, subtitle, body }) {
+  sessionOverlayEl.innerHTML = '';
+
+  const card = document.createElement('div');
+  card.className = 'overlay-card';
+
+  const head = document.createElement('div');
+  head.className = 'overlay-head';
+  head.innerHTML = '<span class="brand-lockup"><span class="brand-mark brand-mark--sm" aria-hidden="true"></span><span class="brand-name">Subtii</span></span>';
+  if (joinCode) {
+    const code = document.createElement('span');
+    code.className = 'm text-muted overlay-code';
+    code.textContent = joinCode;
+    head.appendChild(code);
+  }
+  card.appendChild(head);
+
+  if (tag) {
+    const tagEl = document.createElement('span');
+    tagEl.className = `tag ${tagClass} overlay-tag`;
+    tagEl.textContent = tag;
+    card.appendChild(tagEl);
+  }
+
+  const h2 = document.createElement('h2');
+  h2.textContent = title;
+  card.appendChild(h2);
+
+  if (subtitle) {
+    const sub = document.createElement('div');
+    sub.className = 'overlay-sub text-muted';
+    sub.textContent = subtitle;
+    card.appendChild(sub);
+  }
+
+  card.appendChild(document.createElement('hr')).className = 'hr';
+
+  const p = document.createElement('p');
+  p.className = 'overlay-body text-muted';
+  p.textContent = body;
+  card.appendChild(p);
+
+  sessionOverlayEl.appendChild(card);
   sessionOverlayEl.hidden = false;
 }
 function hideSessionOverlay() {
   sessionOverlayEl.hidden = true;
 }
+
+// --- Light/dark toggle (design 2d default, 2e viewer-switchable) -----------
+const THEME_STORAGE_KEY = 'viewer2.theme';
+function applyStoredTheme() {
+  const dark = localStorage.getItem(THEME_STORAGE_KEY) === 'dark';
+  appEl.classList.toggle('theme-dark', dark);
+  if (themeToggleBtn) themeToggleBtn.textContent = dark ? '☀' : '☾';
+}
+themeToggleBtn?.addEventListener('click', () => {
+  const dark = !appEl.classList.contains('theme-dark');
+  localStorage.setItem(THEME_STORAGE_KEY, dark ? 'dark' : 'light');
+  applyStoredTheme();
+});
+applyStoredTheme();
 
 // --- "顯示原文" toggle: unchecked hides the original pane entirely, and
 // the translation pane's flex:1 fills the freed space automatically. ------
@@ -357,8 +417,8 @@ function connect() {
     }
     if (msg.type === 'register_error') {
       showSessionOverlay(msg.reason === 'invalid_code'
-        ? '找不到此場次，請確認網址或 QR code 是否正確。'
-        : '無法加入場次。');
+        ? { tag: '無法加入', tagClass: 'tag-neutral', title: '找不到此場次', body: '請確認網址或 QR code 是否正確。' }
+        : { title: '無法加入場次', body: '請稍後再試一次。' });
       return;
     }
     if (msg.type === 'session_status') {
@@ -366,9 +426,19 @@ function connect() {
       if (msg.status === 'live') {
         hideSessionOverlay();
       } else if (msg.status === 'created') {
-        showSessionOverlay('尚未開始，請稍候…');
+        showSessionOverlay({
+          tag: '尚未開始',
+          title: msg.name || '這場字幕',
+          body: '講者一開播，這個畫面會自動跳成字幕。不用重新整理，手機放著就好。',
+        });
       } else if (msg.status === 'ended') {
-        showSessionOverlay('本場已結束。');
+        showSessionOverlay({
+          tag: '已結束',
+          tagClass: 'tag-neutral',
+          title: '本場已結束',
+          subtitle: msg.name || undefined,
+          body: '謝謝參與。這個連結不再提供字幕；逐字稿由主辦單位保管。',
+        });
       }
       return;
     }
@@ -378,7 +448,7 @@ function connect() {
 if (joinCode) {
   connect();
 } else {
-  showSessionOverlay('缺少場次代碼，請重新掃描 QR code 或確認網址。');
+  showSessionOverlay({ title: '缺少場次代碼', body: '請重新掃描 QR code 或確認網址。' });
 }
 
 // Manual reconnect: close the old socket without letting its own onclose

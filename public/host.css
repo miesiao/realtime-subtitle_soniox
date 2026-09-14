@@ -1,0 +1,127 @@
+/* Host control page (design 2h desktop / 2j mobile), dark cockpit theme.
+   host.js's logic/ids are untouched — this is a layout + look pass, plus
+   two purely-visual :has() tricks that need no new JS state:
+   - source-language checkboxes render as filled chips
+   - the settings column shows "已鎖定" the moment host.js disables
+     #targetLang (which it already does for the whole recording stint) */
+
+body.theme-dark { min-height: 100vh; }
+a { text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* — alert banners — */
+.alert-banner {
+  display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap;
+  padding: var(--space-2) var(--space-4); font-size: 14px; font-weight: 600;
+}
+.alert-banner--loud { background: var(--color-accent-700); color: var(--color-bg); animation: alertPulse 1.2s ease-in-out infinite; }
+.alert-banner--low { background: var(--color-neutral-800); color: var(--color-accent-400); animation: none; }
+.alert-banner .btn { margin-left: auto; }
+@keyframes alertPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+#hostDisconnectBanner { display: none; }
+#hostDisconnectBanner.visible { display: flex; }
+.alert-text { font-size: 13px; color: var(--color-accent-400); margin-top: var(--space-2); }
+
+/* — top bar — */
+.host-topbar { position: sticky; top: 0; z-index: 10; background: var(--color-bg); border-bottom: 2px solid var(--color-divider); }
+.host-topbar-row { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-2) var(--space-4); flex-wrap: wrap; }
+.host-topbar-row--sub { padding-top: 0; padding-bottom: var(--space-2); font-size: 12px; gap: var(--space-4); }
+.host-topbar-spacer { flex: 1; }
+.session-name-input { width: 260px; font-weight: 800; font-size: 16px; }
+.btn-sm { font-size: 12px; padding: 4px 10px; }
+#wsStatus { color: var(--color-accent-400); }
+.credits-chip { color: var(--color-accent-400); }
+
+/* — control row — */
+.control-row {
+  display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap;
+  padding: var(--space-3) var(--space-4); background: var(--color-surface); border-bottom: 2px solid var(--color-divider);
+}
+.control-btn { font-size: 15px; padding: var(--space-2) var(--space-4); }
+.status-text { color: var(--color-neutral-300); }
+.control-end { margin-left: auto; border: 1px solid var(--color-accent-400); color: var(--color-accent-400); background: none; }
+.control-end:hover { background: color-mix(in srgb, var(--color-accent-400) 12%, transparent); }
+
+/* — 3-column grid: share / monitor / settings — */
+.host-grid { display: grid; grid-template-columns: 280px 1fr 320px; gap: 2px; background: var(--color-divider); }
+.host-col { background: var(--color-bg); padding: var(--space-6); display: flex; flex-direction: column; gap: var(--space-3); }
+
+.qr-wrap { background: var(--color-bg); border: 1px solid var(--color-divider); padding: var(--space-3); display: flex; justify-content: center; }
+.qr-wrap img { width: 100%; max-width: 190px; }
+.join-code-label { margin-top: var(--space-2); }
+.join-code { font-size: 20px; font-weight: 600; letter-spacing: 0.03em; }
+.viewer-link { font-size: 11px; word-break: break-all; color: color-mix(in srgb, var(--color-text) 60%, transparent); }
+
+/* — monitor panes (also used by /single via a separate copy in style.css) — */
+.columns { display: grid; grid-template-columns: 1fr 1fr; gap: 2px; background: var(--color-divider); flex: 1; min-height: 260px; }
+.columns.single-column { grid-template-columns: 1fr; }
+.pane { background: var(--color-bg); display: flex; flex-direction: column; }
+.pane-header { display: flex; justify-content: space-between; align-items: center; padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--color-divider); font-size: 13px; font-weight: 600; }
+.script-badge { font-size: 11px; font-weight: 600; color: var(--color-accent-400); min-height: 16px; }
+.pane-body { padding: var(--space-3); font-size: 15px; line-height: 1.7; overflow-y: auto; flex: 1; white-space: pre-wrap; word-break: break-word; }
+.sent-log-wrap { display: flex; flex-direction: column; gap: var(--space-2); }
+.sent-log-label { font-size: 11px; }
+.sent-log { border: 1px solid var(--color-divider); min-height: 100px; max-height: 160px; font-size: 12px; }
+
+.tok { transition: opacity 0.15s; }
+.tok.non-final { opacity: 0.55; }
+.endpoint-marker { color: var(--color-accent-400); font-size: 13px; margin: 0 2px; }
+.lang-zh { color: #ff9783; }
+.lang-en { color: #7ea6f5; }
+.lang-es { color: #7fd99a; }
+.lang-other { color: var(--color-neutral-400); }
+
+/* — settings column — */
+.host-col--settings { position: relative; }
+.settings-head { display: flex; align-items: center; justify-content: space-between; }
+.lock-tag { display: none; }
+.host-col--settings:has(#targetLang:disabled) .lock-tag { display: inline-flex; }
+.host-col--settings:has(#targetLang:disabled) { opacity: 0.62; }
+
+.field { display: flex; flex-direction: column; gap: 6px; }
+.field label { font-size: 12px; color: color-mix(in srgb, var(--color-text) 70%, transparent); }
+.translate-toggle { display: flex; align-items: center; gap: 8px; font-size: 14px; cursor: pointer; }
+
+.lang-chip-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.lang-checkbox {
+  position: relative; display: inline-flex; align-items: center;
+  font-size: 12px; padding: 4px 10px; cursor: pointer;
+  border: 1px solid var(--color-divider); color: color-mix(in srgb, var(--color-text) 80%, transparent);
+}
+.lang-checkbox input { position: absolute; opacity: 0; width: 0; height: 0; }
+.lang-checkbox:has(input:checked) { background: var(--color-accent); border-color: var(--color-accent); color: var(--color-bg); font-weight: 600; }
+.lang-checkbox:has(input:disabled) { opacity: 0.45; cursor: not-allowed; }
+.auto-detect-toggle { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--color-accent-400); margin-top: var(--space-1); cursor: pointer; }
+#moreLangsDetails { margin-top: var(--space-1); }
+#moreLangsDetails summary { font-size: 12px; cursor: pointer; color: color-mix(in srgb, var(--color-text) 70%, transparent); }
+#moreLangSearch { margin: var(--space-2) 0; }
+
+/* — transcript section — */
+.transcript-section { padding: var(--space-4) var(--space-6); border-top: 2px solid var(--color-divider); display: flex; flex-direction: column; gap: var(--space-2); }
+.transcript-head { display: flex; align-items: center; gap: var(--space-2); font-size: 13px; font-weight: 600; }
+.transcript-actions { display: flex; gap: var(--space-2); }
+.transcript-text { white-space: pre-wrap; font-size: 13px; margin: 0; }
+
+/* — legend — */
+.legend { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-3) var(--space-6); font-size: 12px; }
+.lang-chip { padding: 1px 8px; border: 1px solid var(--color-divider); }
+
+/* — top-up dialog (design system .dialog, over the existing #topupPanel) — */
+#topupPanel:not([hidden]) {
+  position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: var(--space-4);
+  background: color-mix(in srgb, var(--color-neutral-900) 65%, transparent);
+}
+.topup-tiers { display: flex; flex-direction: column; gap: var(--space-2); }
+.topup-lastfive-row { display: flex; align-items: center; gap: var(--space-2); }
+.topup-lastfive-row input { max-width: 100px; }
+
+@media (max-width: 960px) {
+  .host-grid { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 720px) {
+  .host-topbar-row--sub { display: none; }
+  .session-name-input { width: 160px; }
+  .control-row { position: sticky; bottom: 0; z-index: 8; }
+  .columns { grid-template-columns: 1fr; }
+}

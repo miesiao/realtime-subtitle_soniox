@@ -1,0 +1,9 @@
+/* Small centered status page (login-failed and similar one-off messages). */
+.status-page {
+  min-height: 100vh;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: var(--space-3);
+  text-align: center; padding: var(--space-6);
+}
+.status-page h1 { font-size: 28px; margin: 0; }
+.status-page p { max-width: 34em; }
