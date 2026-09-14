@@ -73,8 +73,10 @@ CREATE INDEX IF NOT EXISTS idx_transcript_lines_session_seq
 -- after a human checks the bank statement against last_five — there is no
 -- code path or admin UI that marks an order paid automatically (SPEC step
 -- 5); see the confirmation SQL template wherever this feature was handed off.
+-- `id` is a short human-typeable code (see server.js's generateOrderCode),
+-- not a UUID — a host reads/types this one, unlike sessions.id.
 CREATE TABLE IF NOT EXISTS orders (
-  id              UUID PRIMARY KEY,
+  id              TEXT PRIMARY KEY,
   user_id         UUID NOT NULL REFERENCES users(id),
   amount_paid     INTEGER NOT NULL,
   credits_to_add  INTEGER NOT NULL,
@@ -84,6 +86,12 @@ CREATE TABLE IF NOT EXISTS orders (
   confirmed_at    TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS idx_orders_user_id ON orders (user_id);
+-- The orders table originally shipped with a UUID id column (before order
+-- codes existed) — this widens it in place on any DB that already ran that
+-- version. A no-op cast (text::text) on a DB that never had the old
+-- version, since CREATE TABLE IF NOT EXISTS above already created it as
+-- TEXT; safe to run on every boot either way.
+ALTER TABLE orders ALTER COLUMN id TYPE TEXT USING id::TEXT;
 
 -- Append-only usage record (SPEC step 6: "與扣點一致可追溯"). One row per
 -- successful per-minute charge while a session is live — never updated or

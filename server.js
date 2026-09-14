@@ -308,6 +308,35 @@ function createUniqueJoinCode() {
   return code;
 }
 
+// Order codes (SPEC follow-up: short, human-typeable id instead of a UUID —
+// this is something a host reads over the phone / types into an email, not
+// an internal reference like sessions.id). Same no-readalikes alphabet as
+// join codes, one flat 6-character block, uppercased for visual distinction
+// from join codes. Uniqueness is checked against the DB (orders live there,
+// not in an in-memory Map like sessions) with a short retry loop — collision
+// odds at 6 chars over a 32-symbol alphabet (~1 billion combinations) are
+// negligible for this feature's volume, so a handful of retries is already
+// generous headroom, not a real bottleneck.
+const ORDER_CODE_ALPHABET = JOIN_CODE_ALPHABET.toUpperCase();
+const ORDER_CODE_LENGTH = 6;
+const ORDER_CODE_MAX_ATTEMPTS = 5;
+
+function generateOrderCode() {
+  const bytes = crypto.randomBytes(ORDER_CODE_LENGTH);
+  let s = '';
+  for (let i = 0; i < ORDER_CODE_LENGTH; i++) s += ORDER_CODE_ALPHABET[bytes[i] % ORDER_CODE_ALPHABET.length];
+  return s;
+}
+
+async function createUniqueOrderCode() {
+  for (let attempt = 0; attempt < ORDER_CODE_MAX_ATTEMPTS; attempt++) {
+    const code = generateOrderCode();
+    const existing = await dbGetOrder(code);
+    if (!existing) return code;
+  }
+  throw new Error('Failed to generate a unique order code');
+}
+
 // created: QR issued, host not broadcasting yet, viewers can't watch.
 // live: host is broadcasting, calibrating, viewers can watch.
 // ended: host closed the session for good; join_code no longer admits anyone.
@@ -551,8 +580,9 @@ app.post('/api/orders', requireLoginApi, async (req, res) => {
   }
   let order;
   try {
+    const id = await createUniqueOrderCode();
     order = await dbCreateOrder({
-      id: crypto.randomUUID(),
+      id,
       userId: req.user.id,
       amountPaid: tier.amountPaid,
       creditsToAdd: tier.creditsToAdd,

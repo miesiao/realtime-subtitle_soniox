@@ -2,7 +2,7 @@
 <html lang="zh-Hant">
 <head>
 <meta charset="utf-8" />
-<title>Host — 即時字幕控台</title>
+<title>翻譯字幕系統（試營運）</title>
 <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
@@ -11,9 +11,7 @@
   <div id="lowBalanceBanner" class="warn-banner low" hidden>⚠ 點數即將用盡（剩約 <span id="lowBalanceMinutes">?</span> 分鐘可用），請儘快儲值，避免中途暫停。</div>
 
   <header>
-    <h1>Host（一段式：聽寫＋翻譯）</h1>
-    <div class="model-info">model: stt-rt-v5 · language_hints: 依下方「來源語言」勾選 · one_way translation（可關閉，純轉錄場合不觸發）</div>
-    <div class="model-info">這頁不再是給觀眾看的畫面——觀眾請開 <code>/viewer</code>。這裡只是 host 自己校對用的監看畫面。</div>
+    <h1>翻譯字幕系統（試營運）</h1>
   </header>
 
   <section class="session-info">
@@ -46,9 +44,9 @@
     </div>
     <div id="topupPanel" hidden>
       <div class="topup-tiers">
-        <button type="button" class="topup-tier-btn" data-tier="300">付 300 → 300 點</button>
-        <button type="button" class="topup-tier-btn" data-tier="500">付 500 → 530 點</button>
-        <button type="button" class="topup-tier-btn" data-tier="1000">付 1000 → 1100 點</button>
+        <button type="button" class="topup-tier-btn" data-tier="300">儲值300元 → 300點</button>
+        <button type="button" class="topup-tier-btn" data-tier="500">儲值500元 → 530點</button>
+        <button type="button" class="topup-tier-btn" data-tier="1000">儲值1000元 → 1100點</button>
       </div>
       <div id="orderInfo" hidden>
         <p>訂單編號：<code id="orderIdText"></code></p>
