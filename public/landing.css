@@ -51,6 +51,7 @@ main { max-width: 1180px; margin: 0 auto; padding: 0 var(--space-4); }
 .pricing-detail { display: flex; gap: var(--space-8); margin-top: var(--space-6); align-items: flex-start; flex-wrap: wrap; }
 .pricing-formula { flex: 1; min-width: 240px; }
 .formula { font-size: 19px; font-weight: 600; color: var(--color-accent-700); }
+.formula + .formula { margin-top: 4px; }
 .pricing-formula p { font-size: 14px; color: color-mix(in srgb, var(--color-text) 75%, transparent); margin: var(--space-2) 0 0; }
 .pricing-table { flex: 1; min-width: 240px; }
 
