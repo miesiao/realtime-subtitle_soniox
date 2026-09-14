@@ -17,6 +17,13 @@ CREATE TABLE IF NOT EXISTS users (
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Paid credit system (儲值制): a flat integer balance on the user, spent by
+-- the minute while a session is actually recording (see usage_ledger below
+-- and server.js's per-minute billing timer). Every new Google account starts
+-- at 0 — there is no free allowance, so a brand-new host must top up before
+-- they can open a live session at all.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS credits INTEGER NOT NULL DEFAULT 0;
+
 CREATE TABLE IF NOT EXISTS sessions (
   id                  UUID PRIMARY KEY,
   join_code           TEXT UNIQUE NOT NULL,
@@ -58,3 +65,38 @@ CREATE TABLE IF NOT EXISTS transcript_lines (
 -- transcript endpoint) is the only query pattern that matters here.
 CREATE INDEX IF NOT EXISTS idx_transcript_lines_session_seq
   ON transcript_lines (session_id, seq);
+
+-- Top-up orders (儲值下單). Manual-verification flow, no payment gateway:
+-- the amount→credits mapping is fixed server-side (see server.js's
+-- TOPUP_TIERS) so a tampered client request can never buy more credits than
+-- it paid for. status starts 'pending' and is flipped to 'paid' by hand
+-- after a human checks the bank statement against last_five — there is no
+-- code path or admin UI that marks an order paid automatically (SPEC step
+-- 5); see the confirmation SQL template wherever this feature was handed off.
+CREATE TABLE IF NOT EXISTS orders (
+  id              UUID PRIMARY KEY,
+  user_id         UUID NOT NULL REFERENCES users(id),
+  amount_paid     INTEGER NOT NULL,
+  credits_to_add  INTEGER NOT NULL,
+  last_five       TEXT,
+  status          TEXT NOT NULL DEFAULT 'pending', -- pending | paid | failed
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  confirmed_at    TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_orders_user_id ON orders (user_id);
+
+-- Append-only usage record (SPEC step 6: "與扣點一致可追溯"). One row per
+-- successful per-minute charge while a session is live — never updated or
+-- deleted, so a user's balance history can always be reconstructed and
+-- cross-checked against users.credits independently of the realtime path.
+CREATE TABLE IF NOT EXISTS usage_ledger (
+  id                 BIGSERIAL PRIMARY KEY,
+  session_id         UUID NOT NULL REFERENCES sessions(id),
+  user_id            UUID NOT NULL REFERENCES users(id),
+  credits_charged    INTEGER NOT NULL,
+  target_lang_count  INTEGER NOT NULL,
+  balance_after      INTEGER NOT NULL,
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_usage_ledger_session_id ON usage_ledger (session_id);
+CREATE INDEX IF NOT EXISTS idx_usage_ledger_user_id ON usage_ledger (user_id);

@@ -74,33 +74,48 @@ function pickTranslation(u) {
 }
 
 // --- Translate on/off (host's 純轉錄模式) -----------------------------------
-// Decided from the session's own record (targetLangs, relayed on every
-// session_status — see server.js's session.targetLangs) at join time AND
-// re-derived on every subsequent session_status, NOT guessed from utterance
-// content and NOT locked in after the first read: the host can pause,
-// change source/target language or the translate toggle, and Start again
-// without a new join_code (server.js now re-broadcasts session_status with
-// the updated targetLangs on every host_start, not just the first). null =
-// host hasn't clicked Start yet (unknown) — leave whatever's currently
-// rendered untouched until a real array arrives.
-let translateMode = null;
-function applyTranslateMode() {
-  if (translateMode === false) {
-    translationPaneEl.hidden = true;
-    toggleOriginalLabelEl.hidden = true;
-    appEl.classList.remove('hide-original'); // single pane must show original regardless of the checkbox
-  } else {
-    translationPaneEl.hidden = false;
-    toggleOriginalLabelEl.hidden = false;
-    applyOriginalVisibility(); // restore per the "顯示原文" checkbox, unused while pure-transcription hid it
-  }
+// This is never "decided once" — it's a pure function of the MOST RECENT
+// session_status.targetLangs, re-derived every single time one arrives
+// (server re-broadcasts session_status with the current targetLangs on
+// every host_start, not just the first — see server.js). `translateMode`
+// below is only a memo of what was last *applied*, purely so a repeat
+// broadcast of the same mode (e.g. a pause/Start cycle that didn't touch the
+// translate toggle) doesn't reset a viewer's own mid-session "顯示原文"
+// choice. It is NOT a one-time lock: any session_status whose targetLangs
+// actually differs from the current mode re-triggers a full transition
+// below, including the very first one (null never equals true/false, so the
+// first real message always transitions).
+let translateMode = null; // null = no session_status seen yet (still on the HTML's own defaults)
+
+// Pure-transcription: only the original ever renders, and there is no UI
+// left to fight that — the toggle is hidden AND the checkbox is force-reset
+// to checked so that IF translation mode returns later, it starts from the
+// correct default rather than whatever the checkbox happened to hold.
+function enterTranscriptionMode() {
+  translationPaneEl.hidden = true;
+  toggleOriginalLabelEl.hidden = true;
+  showOriginalEl.checked = true;
+  appEl.classList.remove('hide-original'); // single pane must show original regardless of the checkbox
 }
+
+// Translation mode: "顯示原文" always starts checked on (re-)entry — never
+// carries over whatever a *previous* translation-mode stint left it at —
+// but is left alone for as long as we stay in this mode, so a viewer's own
+// toggle click mid-session survives redundant same-mode session_status
+// broadcasts (see translateMode comment above).
+function enterTranslationMode() {
+  translationPaneEl.hidden = false;
+  toggleOriginalLabelEl.hidden = false;
+  showOriginalEl.checked = true;
+  applyOriginalVisibility();
+}
+
 function setTranslateMode(targetLangs) {
-  if (!Array.isArray(targetLangs)) return;
+  if (!Array.isArray(targetLangs)) return; // status 'created' — host hasn't chosen yet
   const next = targetLangs.length > 0;
-  if (next === translateMode) return; // no actual change — skip the redundant re-render
+  if (next === translateMode) return; // same mode as last time — not a transition
   translateMode = next;
-  applyTranslateMode();
+  if (next) enterTranslationMode(); else enterTranscriptionMode();
 }
 
 // --- Sentence splitting (pure punctuation matching, no AI) -----------------

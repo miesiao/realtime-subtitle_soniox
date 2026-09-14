@@ -34,6 +34,41 @@ header h1 { font-size: 18px; margin: 0 0 4px; }
   50% { opacity: 0.55; }
 }
 
+/* Billing banners (SPEC step 6). creditsPausedBanner reuses the same loud
+   red treatment as hostDisconnectBanner — an auto-pause is just as
+   impossible-to-miss-worthy as a disconnect. The low-balance warning is
+   deliberately calmer (amber, no pulse): it's a heads-up, not yet an
+   emergency. */
+.warn-banner {
+  background: #b91c1c;
+  color: #fff;
+  font-weight: 700;
+  font-size: 15px;
+  text-align: center;
+  padding: 10px 16px;
+  margin: -16px -24px 16px;
+  animation: hostAlertPulse 1.2s ease-in-out infinite;
+}
+.warn-banner.low {
+  background: #92640a;
+  animation: none;
+}
+
+.billing {
+  background: #161923;
+  border: 1px solid #262b36;
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+}
+#creditsDisplay { color: #f0f6fc; font-size: 15px; }
+#topupPanel { margin-top: 10px; display: flex; flex-direction: column; gap: 10px; }
+.topup-tiers { display: flex; flex-wrap: wrap; gap: 8px; }
+#orderInfo { font-size: 13px; color: #ccc; }
+#orderInfo p { margin: 4px 0; }
+#orderInfo code { color: #f0f6fc; background: #0d1117; padding: 2px 8px; border-radius: 6px; }
+#lastFiveInput { width: 90px; }
+
 .session-info {
   background: #161923;
   border: 1px solid #262b36;

@@ -110,6 +110,19 @@ const transcriptTextEl = document.getElementById('transcriptText');
 const retryTranscriptBtn = document.getElementById('retryTranscriptBtn');
 const downloadTranscriptBtn = document.getElementById('downloadTranscriptBtn');
 const whoAmIEl = document.getElementById('whoAmI');
+const creditsPausedBannerEl = document.getElementById('creditsPausedBanner');
+const lowBalanceBannerEl = document.getElementById('lowBalanceBanner');
+const lowBalanceMinutesEl = document.getElementById('lowBalanceMinutes');
+const creditsDisplayEl = document.getElementById('creditsDisplay');
+const topupToggleBtn = document.getElementById('topupToggleBtn');
+const topupPanelEl = document.getElementById('topupPanel');
+const topupTierBtns = document.querySelectorAll('.topup-tier-btn');
+const orderInfoEl = document.getElementById('orderInfo');
+const orderIdTextEl = document.getElementById('orderIdText');
+const orderAmountTextEl = document.getElementById('orderAmountText');
+const lastFiveInputEl = document.getElementById('lastFiveInput');
+const submitLastFiveBtn = document.getElementById('submitLastFiveBtn');
+const orderStatusTextEl = document.getElementById('orderStatusText');
 
 // --- Login status (SPEC §3a) ------------------------------------------------
 // This page is server-side login-gated (GET /host redirects to Google if
@@ -142,6 +155,90 @@ async function loadWhoAmI() {
   }
 }
 loadWhoAmI();
+
+// --- Credits / top-up (SPEC steps 3/6) --------------------------------------
+// currentCredits is a display cache only — every enforcement decision is
+// made server-side (POST /api/temporary-key, the WS host_start handler);
+// this value is never trusted for anything except what number to show and
+// whether to bother the user with a client-side "you probably can't afford
+// this" heads-up before they even try Start.
+let currentCredits = null;
+
+function renderCredits() {
+  creditsDisplayEl.textContent = currentCredits === null ? '…' : String(currentCredits);
+}
+
+async function refreshCredits() {
+  try {
+    const data = await apiFetchJson('/api/credits');
+    currentCredits = data.credits;
+    renderCredits();
+  } catch (err) {
+    if (err.message !== 'login_required') console.error('Failed to load credits:', err);
+  }
+}
+refreshCredits();
+
+// Same formula as server.js's creditsPerMinuteFor — kept in sync by hand
+// since this is only ever a pre-flight courtesy check; /api/temporary-key
+// and the WS host_start handler are the actual source of truth for cost.
+function currentRequiredCreditsPerMinute() {
+  return 2 + (translateEnabledEl.checked ? 1 : 0);
+}
+
+topupToggleBtn.addEventListener('click', () => {
+  topupPanelEl.hidden = !topupPanelEl.hidden;
+});
+
+for (const btn of topupTierBtns) {
+  btn.addEventListener('click', async () => {
+    for (const b of topupTierBtns) b.disabled = true;
+    orderStatusTextEl.textContent = '建立訂單中…';
+    try {
+      const order = await apiFetchJson('/api/orders', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tier: Number(btn.dataset.tier) }),
+      });
+      orderIdTextEl.textContent = order.id;
+      orderAmountTextEl.textContent = order.amountPaid;
+      lastFiveInputEl.value = '';
+      orderStatusTextEl.textContent = '';
+      orderInfoEl.hidden = false;
+      orderInfoEl.dataset.orderId = order.id;
+    } catch (err) {
+      console.error('Failed to create order:', err);
+      orderStatusTextEl.textContent = `建立訂單失敗：${err.message}`;
+    } finally {
+      for (const b of topupTierBtns) b.disabled = false;
+    }
+  });
+}
+
+submitLastFiveBtn.addEventListener('click', async () => {
+  const orderId = orderInfoEl.dataset.orderId;
+  if (!orderId) return;
+  const lastFive = lastFiveInputEl.value.trim();
+  if (!/^[0-9]{5}$/.test(lastFive)) {
+    orderStatusTextEl.textContent = '請輸入 5 位數字（轉帳帳號後五碼）';
+    return;
+  }
+  submitLastFiveBtn.disabled = true;
+  orderStatusTextEl.textContent = '送出中…';
+  try {
+    await apiFetchJson(`/api/orders/${orderId}/last-five`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ lastFive }),
+    });
+    orderStatusTextEl.textContent = '已送出，請等候人工確認入帳（confirmed 後點數會自動更新，可重新整理頁面查詢餘額）。';
+  } catch (err) {
+    console.error('Failed to submit last-five:', err);
+    orderStatusTextEl.textContent = `送出失敗：${err.message}`;
+  } finally {
+    submitLastFiveBtn.disabled = false;
+  }
+});
 
 // --- Source language picker (language_hints) --------------------------------
 // language_hints only ever *biases* Soniox toward these languages — it's not
@@ -297,6 +394,22 @@ function connectWs() {
       viewerCountEl.textContent = `viewers: ${msg.count}`;
     } else if (msg.type === 'register_error') {
       wsStatusEl.textContent = `ws: register failed (${msg.reason})`;
+    } else if (msg.type === 'credits_update') {
+      currentCredits = msg.credits;
+      renderCredits();
+    } else if (msg.type === 'low_balance_warning') {
+      currentCredits = msg.credits;
+      renderCredits();
+      lowBalanceMinutesEl.textContent = String(msg.minutesRemaining);
+      lowBalanceBannerEl.hidden = false;
+    } else if (msg.type === 'force_pause') {
+      // Server-driven auto-pause (SPEC step 6): credits ran out mid-session.
+      // Reuses the exact same client-side pause path as the Pause button —
+      // stops Soniox, keeps join_code/viewers/history untouched — the only
+      // difference from a manual Pause is who pressed it.
+      lowBalanceBannerEl.hidden = true;
+      creditsPausedBannerEl.hidden = false;
+      pauseRecording();
     }
   });
 }
@@ -472,9 +585,14 @@ function sendUtterance(original, translation) {
 }
 
 function requestTemporaryKey(secret) {
+  // targetLangCount travels with this request so the server can check
+  // credits against the SAME rate host_start/the billing timer will use
+  // (SPEC step 6) — see currentRequiredCreditsPerMinute's comment.
   return fetch('/api/temporary-key', {
     method: 'POST',
-    headers: { 'x-host-secret': secret },
+    credentials: 'same-origin',
+    headers: { 'x-host-secret': secret, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ targetLangCount: translateEnabledEl.checked ? 1 : 0 }),
   });
 }
 
@@ -485,6 +603,12 @@ async function fetchTemporaryKey() {
     alert('密碼錯誤，請重新輸入');
     hostSecret = promptForHostSecret();
     res = await requestTemporaryKey(hostSecret);
+  }
+  if (res.status === 402) {
+    const body = await res.json().catch(() => ({}));
+    const err = new Error(`點數不足，請先儲值（目前 ${body.credits ?? 0} 點，開播需要 ${body.required ?? '?'} 點/分鐘）`);
+    err.code = 'insufficient_credits';
+    throw err;
   }
   if (!res.ok) throw new Error('Failed to fetch temporary key from server');
   const { api_key } = await res.json();
@@ -770,11 +894,17 @@ function parseTerms(raw) {
 // `.code` (see @soniox/client's audio/errors.ts: AudioPermissionError,
 // AudioDeviceError, AudioUnavailableError) — translate those into something
 // a non-technical host can act on, instead of the bare string "error".
-const NON_RETRIABLE_ERROR_CODES = new Set(['permission_denied', 'device_not_found', 'audio_unavailable']);
+// insufficient_credits (SPEC step 6) comes from fetchTemporaryKey above, not
+// the SDK — same non-retriable treatment as a real device/permission error:
+// retrying against an empty wallet can't ever succeed on its own.
+const NON_RETRIABLE_ERROR_CODES = new Set(['permission_denied', 'device_not_found', 'audio_unavailable', 'insufficient_credits']);
 
 function describeRecordingError(err) {
   const code = err && err.code;
   const message = (err && err.message) || String(err);
+  if (code === 'insufficient_credits') {
+    return message;
+  }
   if (code === 'permission_denied') {
     return '麥克風權限被拒絕，請點瀏覽器網址列的麥克風/鎖頭圖示允許存取，再按 Start 重試。';
   }
@@ -892,11 +1022,26 @@ function startRecording() {
   });
 }
 
-startBtn.addEventListener('click', () => {
+startBtn.addEventListener('click', async () => {
   // Boundary case (SPEC point 3): block Start rather than silently falling
   // back to "no hints" if nothing is checked and auto-detect isn't chosen.
   const sourceSelection = currentSourceLangSelection();
   if (!validateSourceLangSelection(sourceSelection)) return;
+
+  // Pre-flight credit check (SPEC step 6 "開場預檢") — purely a courtesy so
+  // a 0-point (or too-low) host gets an immediate, clear message instead of
+  // a confusing Soniox connection failure a moment later. This is NOT the
+  // enforcement point: /api/temporary-key and the WS host_start handler
+  // check the same thing server-side and are what actually can't be
+  // bypassed, so a stale currentCredits here can only over-block, never
+  // let an unaffordable session through.
+  await refreshCredits();
+  const requiredCredits = currentRequiredCreditsPerMinute();
+  if (currentCredits === null || currentCredits < requiredCredits) {
+    alert(`點數不足，請先儲值再開播（目前 ${currentCredits ?? 0} 點，開播需要至少 ${requiredCredits} 點/分鐘）`);
+    return;
+  }
+  creditsPausedBannerEl.hidden = true;
 
   sonioxRetryCount = 0; // manual Start always gets a fresh retry budget
   userWantsRecording = true;
@@ -905,6 +1050,9 @@ startBtn.addEventListener('click', () => {
   // translateEnabled/targetLanguage/sourceLangs are only for the session's DB
   // record (SPEC §6.5 "如實記錄") — they don't affect Soniox itself, which is
   // config'd separately in startRecording() below from the same controls.
+  // The server independently re-derives and re-checks the credit rate from
+  // these same fields before actually starting its billing timer (SPEC step
+  // 6) — see server.js's host_start handler.
   if (ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({
       type: 'host_start',
@@ -918,8 +1066,11 @@ startBtn.addEventListener('click', () => {
 
 // This is a pause, not a wipe: it only stops the Soniox session. History on
 // the server and on every viewer is untouched, and Start can pick back up
-// right after. Only clearBtn below ever clears anything.
-stopBtn.addEventListener('click', async () => {
+// right after. Only clearBtn below ever clears anything. Shared by the
+// manual Pause button below AND the server-driven force_pause message (SPEC
+// step 6's auto-pause) — from this function's point of view the two are
+// identical, only who triggered it differs.
+async function pauseRecording() {
   if (!recording) return;
   userWantsRecording = false; // must be set before recording.stop() — see comment above
   clearTimeout(sonioxRetryTimer);
@@ -933,6 +1084,17 @@ stopBtn.addEventListener('click', async () => {
   flushPair();
   setUiRecording(false);
   statusEl.textContent = 'idle';
+  // Billing (SPEC step 6): stop the server's per-minute meter — mirrors
+  // host_start's role in starting it. Sent unconditionally; if the server
+  // already stopped it on its own (this pause WAS the force_pause), it's a
+  // harmless no-op there.
+  if (ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'host_stop' }));
+  }
+}
+
+stopBtn.addEventListener('click', () => {
+  pauseRecording();
 });
 
 clearBtn.addEventListener('click', () => {
@@ -946,18 +1108,7 @@ clearBtn.addEventListener('click', () => {
 // lands; starting a new session means reloading this page (§0: "用完即拋").
 endSessionBtn.addEventListener('click', async () => {
   if (!confirm('確定要結束本場嗎？結束後這個場次代碼就不能再進場了。')) return;
-  if (recording && userWantsRecording) {
-    userWantsRecording = false;
-    clearTimeout(sonioxRetryTimer);
-    statusEl.textContent = 'stopping…';
-    try {
-      await recording.stop();
-    } catch (err) {
-      console.error('Stop failed:', err);
-    }
-    flushPair();
-    setUiRecording(false);
-  }
+  await pauseRecording(); // no-op if nothing was recording — see its own guard
   if (ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: 'host_end_session' }));
   }

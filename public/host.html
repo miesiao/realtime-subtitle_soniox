@@ -7,6 +7,8 @@
 </head>
 <body>
   <div id="hostDisconnectBanner">⚠ 與伺服器斷線！所有觀眾目前收不到新字幕 — 正在自動重新連接…</div>
+  <div id="creditsPausedBanner" class="warn-banner" hidden>⚠ 點數已用盡，本場已自動暫停（join code 與觀眾連線不受影響）。請儲值後按 Start 繼續本場。</div>
+  <div id="lowBalanceBanner" class="warn-banner low" hidden>⚠ 點數即將用盡（剩約 <span id="lowBalanceMinutes">?</span> 分鐘可用），請儘快儲值，避免中途暫停。</div>
 
   <header>
     <h1>Host（一段式：聽寫＋翻譯）</h1>
@@ -34,6 +36,31 @@
     <div id="sessionError" class="session-error" hidden>
       <span id="sessionErrorText"></span>
       <button id="retrySessionBtn" type="button">重試</button>
+    </div>
+  </section>
+
+  <section class="billing">
+    <div class="session-info-row">
+      <span>點數餘額：<strong id="creditsDisplay">…</strong> 點</span>
+      <button id="topupToggleBtn" type="button">儲值</button>
+    </div>
+    <div id="topupPanel" hidden>
+      <div class="topup-tiers">
+        <button type="button" class="topup-tier-btn" data-tier="300">付 300 → 300 點</button>
+        <button type="button" class="topup-tier-btn" data-tier="500">付 500 → 530 點</button>
+        <button type="button" class="topup-tier-btn" data-tier="1000">付 1000 → 1100 點</button>
+      </div>
+      <div id="orderInfo" hidden>
+        <p>訂單編號：<code id="orderIdText"></code></p>
+        <p>請匯款 <strong id="orderAmountText"></strong> 元至：<br />808 玉山銀行 民權分行 / 南隅有限公司 / 0598-940-168796</p>
+        <p>轉帳完成後，請回填帳號後五碼以便核對入帳：</p>
+        <label class="session-info-row">
+          後五碼
+          <input id="lastFiveInput" type="text" inputmode="numeric" maxlength="5" placeholder="12345" />
+          <button id="submitLastFiveBtn" type="button">送出</button>
+        </label>
+        <span id="orderStatusText" class="status"></span>
+      </div>
     </div>
   </section>
 

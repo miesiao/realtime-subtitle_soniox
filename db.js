@@ -94,6 +94,93 @@ export async function dbGetUserById(id) {
   return result.rows[0] || null;
 }
 
+// --- credits / billing (SPEC step 6) -------------------------------------
+// The credit balance is the ONLY cost defense once login is opened to the
+// public, so unlike most reads in this file this one deliberately has no
+// "degrade gracefully" story: a null return here must make the caller treat
+// the user as unable to afford anything, never as "unknown, let it through".
+export async function dbGetUserCredits(userId) {
+  if (!dbReady()) return null;
+  const result = await pool.query(`SELECT credits FROM users WHERE id = $1`, [userId]);
+  return result.rows[0] ? result.rows[0].credits : null;
+}
+
+// Atomic conditional debit: only succeeds (and only returns a row) if the
+// balance can actually cover `amount` — `credits >= amount` is checked by
+// Postgres itself in the same statement that decrements it, so two
+// concurrent charge attempts for the same user can never both succeed and
+// drive the balance negative (the second one's WHERE simply matches zero
+// rows once the first has already spent it). Returns null on insufficient
+// balance or DB unavailability — callers must treat both as "can't charge".
+export async function dbChargeCredits(userId, amount) {
+  if (!dbReady()) return null;
+  const result = await pool.query(
+    `UPDATE users SET credits = credits - $2 WHERE id = $1 AND credits >= $2 RETURNING credits`,
+    [userId, amount]
+  );
+  return result.rows[0] ? result.rows[0].credits : null;
+}
+
+// Manual top-up confirmation writes straight to the DB by hand (SPEC step
+// 5 — no admin UI); this helper exists only for completeness/tests, nothing
+// in the live request path calls it.
+export async function dbAddCredits(userId, amount) {
+  if (!dbReady()) return null;
+  const result = await pool.query(
+    `UPDATE users SET credits = credits + $2 WHERE id = $1 RETURNING credits`,
+    [userId, amount]
+  );
+  return result.rows[0] ? result.rows[0].credits : null;
+}
+
+// --- orders (儲值下單, SPEC step 3) ----------------------------------------
+
+export async function dbCreateOrder({ id, userId, amountPaid, creditsToAdd }) {
+  if (!dbReady()) throw new Error('Database not available');
+  const result = await pool.query(
+    `INSERT INTO orders (id, user_id, amount_paid, credits_to_add, status)
+     VALUES ($1, $2, $3, $4, 'pending')
+     RETURNING id, user_id, amount_paid, credits_to_add, last_five, status, created_at, confirmed_at`,
+    [id, userId, amountPaid, creditsToAdd]
+  );
+  return result.rows[0];
+}
+
+// Ownership-scoped on purpose (WHERE id = $1 AND user_id = $2) — a host can
+// only fill in the last-five of their own order, never guess/overwrite
+// someone else's by id. Returns null if the order doesn't exist or isn't
+// this user's, so the route can 404 without leaking which is which.
+export async function dbSetOrderLastFive(id, userId, lastFive) {
+  if (!dbReady()) return null;
+  const result = await pool.query(
+    `UPDATE orders SET last_five = $3 WHERE id = $1 AND user_id = $2
+     RETURNING id, user_id, amount_paid, credits_to_add, last_five, status, created_at, confirmed_at`,
+    [id, userId, lastFive]
+  );
+  return result.rows[0] || null;
+}
+
+export async function dbGetOrder(id) {
+  if (!dbReady()) return null;
+  const result = await pool.query(
+    `SELECT id, user_id, amount_paid, credits_to_add, last_five, status, created_at, confirmed_at
+     FROM orders WHERE id = $1`,
+    [id]
+  );
+  return result.rows[0] || null;
+}
+
+// --- usage_ledger (SPEC step 6: append-only, traceable) --------------------
+
+export async function dbInsertUsageLedger({ sessionId, userId, creditsCharged, targetLangCount, balanceAfter }) {
+  if (!dbReady()) return;
+  await pool.query(
+    `INSERT INTO usage_ledger (session_id, user_id, credits_charged, target_lang_count, balance_after)
+     VALUES ($1, $2, $3, $4, $5)`,
+    [sessionId, userId, creditsCharged, targetLangCount, balanceAfter]
+  );
+}
+
 // --- sessions ---------------------------------------------------------
 
 export async function dbInsertSession({ id, joinCode, name, sourceLang, targetLangs, userId }) {

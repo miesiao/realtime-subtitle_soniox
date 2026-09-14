@@ -26,8 +26,15 @@ import {
   dbGetUserById,
   dbGetSessionOwner,
   dbGetSessionsByUser,
+  dbGetUserCredits,
+  dbChargeCredits,
+  dbCreateOrder,
+  dbSetOrderLastFive,
+  dbGetOrder,
+  dbInsertUsageLedger,
 } from './db.js';
 import { runTranscriptCleanup } from './transcript-cleanup.js';
+import { sendOrderNotificationEmail } from './mail.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 8787;
@@ -65,6 +72,37 @@ function isValidHostSecret(provided) {
   if (expectedBuf.length !== providedBuf.length) return false;
   return crypto.timingSafeEqual(expectedBuf, providedBuf);
 }
+
+// ---------------------------------------------------------------------------
+// Paid credit system (SPEC steps 3/6). Amount→credits mapping is fixed here,
+// server-side, precisely so a tampered client request can never buy more
+// credits than it paid for — the client only ever picks a `tier` key.
+// ---------------------------------------------------------------------------
+const TOPUP_TIERS = {
+  300: { amountPaid: 300, creditsToAdd: 300 },
+  500: { amountPaid: 500, creditsToAdd: 530 },
+  1000: { amountPaid: 1000, creditsToAdd: 1100 },
+};
+const BANK_INFO = '808 玉山銀行 民權分行 / 南隅有限公司 / 0598-940-168796';
+
+// Billing rate (SPEC step 6): 2 credits/min base (pure transcription) + 1
+// credit/min per target language. Only one target language is selectable
+// today (host.js's single targetLangSelect), so targetLangCount is always 0
+// or 1 in practice — written generically in case that ever changes.
+const BASE_CREDITS_PER_MINUTE = 2;
+function creditsPerMinuteFor(targetLangCount) {
+  return BASE_CREDITS_PER_MINUTE + targetLangCount;
+}
+const BILLING_TICK_MS = 60 * 1000;
+// "剩約 10 分鐘時預警" (SPEC step 6) — worth warning about, not yet an
+// emergency; the real backstop is the auto-pause below.
+const LOW_BALANCE_WARNING_MINUTES = 10;
+// Host WS reconnects (network blip) must NOT stop billing — host.js's own
+// reconnect backoff caps at 10s, so any gap under this is routine. Only a
+// gap this long is treated as "host actually walked away" (closed the tab,
+// lost power, etc.) and stops the meter so a dead session can't rack up
+// charges against nobody's audio.
+const BILLING_DISCONNECT_GRACE_MS = 90 * 1000;
 
 // Gate for /api/temporary-key only (see comment above). Writes the error
 // response itself and returns false on failure so the caller can just
@@ -119,13 +157,23 @@ function parseAllowlist(raw) {
   );
 }
 const LOGIN_ALLOWLIST = parseAllowlist(process.env.LOGIN_ALLOWLIST);
-if (LOGIN_ALLOWLIST.size === 0) {
+// Public-launch switch (SPEC step 2): once true, ANY Google account may log
+// in/register (a fresh one starting at credits = 0, upsert logic unchanged)
+// and LOGIN_ALLOWLIST below is never consulted. Deliberately NOT the
+// default — flip this on only after the credit gate + auto-pause (SPEC step
+// 6) has been verified working, per the ordering note in .env.example: this
+// is the door, the credit gate is the lock, and the lock has to already be
+// installed before the door opens.
+const OPEN_SIGNUP = process.env.OPEN_SIGNUP === 'true';
+if (!OPEN_SIGNUP && LOGIN_ALLOWLIST.size === 0) {
   console.error(
     'LOGIN_ALLOWLIST 未設定或為空 — 目前所有 Google 登入都會被拒絕。' +
-    '請在環境變數設定 LOGIN_ALLOWLIST（逗號分隔的 email 清單）以允許特定帳號登入本服務。'
+    '請在環境變數設定 LOGIN_ALLOWLIST（逗號分隔的 email 清單）以允許特定帳號登入本服務，' +
+    '或在驗證過點數防線後將 OPEN_SIGNUP 設為 true 開放註冊。'
   );
 }
 function isEmailAllowed(email) {
+  if (OPEN_SIGNUP) return Boolean(email);
   if (!email) return false;
   return LOGIN_ALLOWLIST.has(String(email).trim().toLowerCase());
 }
@@ -263,7 +311,7 @@ function createUniqueJoinCode() {
 // created: QR issued, host not broadcasting yet, viewers can't watch.
 // live: host is broadcasting, calibrating, viewers can watch.
 // ended: host closed the session for good; join_code no longer admits anyone.
-function createSession() {
+function createSession(userId) {
   const id = crypto.randomUUID();
   const joinCode = createUniqueJoinCode();
   const session = {
@@ -271,6 +319,22 @@ function createSession() {
     joinCode,
     name: null,
     status: 'created',
+    // Owning user (SPEC step 6): who to charge/credit-check for this
+    // session's per-minute billing. Always set — every session now requires
+    // login to create (see POST /api/sessions) — but kept nullable-safe
+    // throughout the billing helpers below in case an old in-memory session
+    // somehow predates this field.
+    userId: userId || null,
+    // Billing state (SPEC step 6), all reset on every host_start:
+    // billingRate = credits/minute for the CURRENT recording stint,
+    // billingTimer = the setInterval charging it, lowBalanceWarned = have we
+    // already sent the ~10-min warning for this stint (so it fires once, not
+    // every tick), disconnectGraceTimer = pending "host really left" timeout
+    // (see BILLING_DISCONNECT_GRACE_MS).
+    billingRate: null,
+    billingTimer: null,
+    lowBalanceWarned: false,
+    disconnectGraceTimer: null,
     // null = host hasn't clicked Start yet (unknown); [] = pure transcription
     // (translation off); [lang] = one_way translation to `lang`. Set once at
     // host_start and never changed after — see the host_start handler below.
@@ -356,8 +420,40 @@ app.use((err, req, res, next) => {
   next(err);
 });
 
+// The real cost gate (SPEC step 6): this is the one endpoint that actually
+// causes Soniox spend, so it's where credits are checked, not just at
+// host_start over the WS (that check exists too, for session-state
+// consistency, but a client could in principle skip straight to this
+// endpoint — this one has to hold on its own). targetLangCount comes from
+// the client (host.js reads it off the same checkbox state host_start
+// does) so the rate matches whatever the host is actually about to record
+// with; an invalid/missing value is clamped to 0 (cheapest, pure-
+// transcription rate) rather than trusted as something higher.
 app.post('/api/temporary-key', async (req, res) => {
   if (!authorizeHost(req, res)) return;
+  if (!req.isAuthenticated()) {
+    res.status(401).json({ error: 'login_required' });
+    return;
+  }
+  const targetLangCount = Number.isInteger(req.body.targetLangCount) && req.body.targetLangCount > 0
+    ? req.body.targetLangCount
+    : 0;
+  const requiredCredits = creditsPerMinuteFor(targetLangCount);
+  let credits;
+  try {
+    credits = await dbGetUserCredits(req.user.id);
+  } catch (err) {
+    console.error(`[db] failed to read credits for user ${req.user.id}:`, err);
+    res.status(500).json({ error: 'Failed to check credits' });
+    return;
+  }
+  // null (DB unreachable, or user row missing) is treated the same as "not
+  // enough" — see dbGetUserCredits's own comment: this is the cost defense,
+  // it does not get to fail open.
+  if (credits === null || credits < requiredCredits) {
+    res.status(402).json({ error: 'insufficient_credits', credits: credits ?? 0, required: requiredCredits });
+    return;
+  }
   try {
     // usage_type must be "transcribe_websocket" for real-time STT (per @soniox/node types).
     const { api_key, expires_at } = await soniox.auth.createTemporaryKey({
@@ -376,7 +472,7 @@ app.post('/api/temporary-key', async (req, res) => {
 // point 3 — this replaces the old shared host-secret gate for this one
 // endpoint; see requireLoginApi/authorizeHost comments above).
 app.post('/api/sessions', requireLoginApi, async (req, res) => {
-  const session = createSession();
+  const session = createSession(req.user.id);
   // DB is the source of truth for session metadata (SPEC §6.5); this is an
   // infrequent, one-off write (not the per-utterance hot path), so it's
   // fine to await it here. A DB outage must not stop hosts from starting
@@ -427,6 +523,83 @@ app.get('/api/me', (req, res) => {
     return;
   }
   res.status(200).json({ id: req.user.id, email: req.user.email, name: req.user.name });
+});
+
+// --- Credits / top-up (SPEC steps 3/6) --------------------------------------
+
+// Host.js polls this before ever attempting Start (SPEC step 6 "開場預
+// 檢") — a client-side courtesy check only; /api/temporary-key is the
+// endpoint that actually enforces it.
+app.get('/api/credits', requireLoginApi, async (req, res) => {
+  try {
+    const credits = await dbGetUserCredits(req.user.id);
+    res.status(200).json({ credits: credits ?? 0 });
+  } catch (err) {
+    console.error(`[db] failed to read credits for user ${req.user.id}:`, err);
+    res.status(500).json({ error: 'Failed to read credits' });
+  }
+});
+
+// Step 3: pick a tier → create a pending order → show bank info + order id.
+// `tier` is one of TOPUP_TIERS's keys (the amount in NTD); the credits
+// awarded for it are looked up server-side, never taken from the client.
+app.post('/api/orders', requireLoginApi, async (req, res) => {
+  const tier = TOPUP_TIERS[req.body.tier];
+  if (!tier) {
+    res.status(400).json({ error: 'invalid_tier', validTiers: Object.keys(TOPUP_TIERS).map(Number) });
+    return;
+  }
+  let order;
+  try {
+    order = await dbCreateOrder({
+      id: crypto.randomUUID(),
+      userId: req.user.id,
+      amountPaid: tier.amountPaid,
+      creditsToAdd: tier.creditsToAdd,
+    });
+  } catch (err) {
+    console.error(`[db] failed to create order for user ${req.user.id}:`, err);
+    res.status(500).json({ error: 'Failed to create order' });
+    return;
+  }
+  res.status(200).json({
+    id: order.id,
+    amountPaid: order.amount_paid,
+    creditsToAdd: order.credits_to_add,
+    status: order.status,
+    bankInfo: BANK_INFO,
+  });
+});
+
+// Step 3/4: host fills in the transfer's last five digits → recorded on the
+// order → SPEC step 4's notification email fires. Ownership-scoped by
+// dbSetOrderLastFive (WHERE user_id = $2) so a host can't touch another
+// user's order by guessing its id.
+app.patch('/api/orders/:id/last-five', requireLoginApi, async (req, res) => {
+  const { id } = req.params;
+  const lastFive = typeof req.body.lastFive === 'string' ? req.body.lastFive.trim() : '';
+  if (!/^[0-9]{5}$/.test(lastFive)) {
+    res.status(400).json({ error: 'invalid_last_five' });
+    return;
+  }
+  let order;
+  try {
+    order = await dbSetOrderLastFive(id, req.user.id, lastFive);
+  } catch (err) {
+    console.error(`[db] failed to record last-five for order ${id}:`, err);
+    res.status(500).json({ error: 'Failed to update order' });
+    return;
+  }
+  if (!order) {
+    res.status(404).json({ error: 'order_not_found' });
+    return;
+  }
+  res.status(200).json({ id: order.id, status: order.status, lastFive: order.last_five });
+  // Email is fire-and-forget and best-effort (SPEC step 4: "寄信失敗只
+  // log,不中斷下單") — the response above has already gone out regardless.
+  sendOrderNotificationEmail({ order, user: req.user }).catch((err) => {
+    console.error(`[mail] unexpected failure notifying about order ${id}:`, err);
+  });
 });
 
 // Ownership check shared by rename/transcript/retry below (SPEC §3a point
@@ -665,6 +838,100 @@ function pushUtterance(session, { original, translations }) {
   insertPromise.finally(() => session.pendingInserts.delete(insertPromise));
 }
 
+// ---------------------------------------------------------------------------
+// Per-minute billing (SPEC step 6) — the only cost defense once signup is
+// open to the public. Lives entirely on the in-memory `session` object
+// (billingTimer/billingRate/lowBalanceWarned/disconnectGraceTimer, see
+// createSession) so it survives a host WS reconnect untouched: the timer is
+// keyed to the session, not to any one WebSocket instance.
+// ---------------------------------------------------------------------------
+
+function clearBillingTimer(session) {
+  if (session.billingTimer) {
+    clearInterval(session.billingTimer);
+    session.billingTimer = null;
+  }
+}
+
+function clearDisconnectGrace(session) {
+  if (session.disconnectGraceTimer) {
+    clearTimeout(session.disconnectGraceTimer);
+    session.disconnectGraceTimer = null;
+  }
+}
+
+// Auto-pause (SPEC step 6, the critical one): stop the meter and tell the
+// host to stop recording, but touch NOTHING about the session's lifecycle —
+// status stays 'live', join_code keeps admitting viewers, viewers' own
+// connections are untouched. This is exactly what host.js's own Pause
+// button already does server-side (nothing) — the only new part is telling
+// the host's browser to actually stop Soniox, since the server can't do
+// that itself (audio goes straight from the host's browser to Soniox, never
+// through this server).
+function autoPauseForInsufficientCredits(session, credits) {
+  clearBillingTimer(session);
+  console.log(`[billing] session ${session.id} auto-paused — user ${session.userId} out of credits (${credits})`);
+  send(session.hostWs, { type: 'force_pause', reason: 'insufficient_credits', credits });
+}
+
+function maybeWarnLowBalance(session, credits) {
+  if (session.lowBalanceWarned || !session.billingRate) return;
+  const minutesRemaining = Math.floor(credits / session.billingRate);
+  if (minutesRemaining <= LOW_BALANCE_WARNING_MINUTES) {
+    session.lowBalanceWarned = true;
+    send(session.hostWs, { type: 'low_balance_warning', credits, minutesRemaining });
+  }
+}
+
+// Prepay model: charges for the NEXT minute of recording before it happens
+// (called once immediately at Start, then once per BILLING_TICK_MS after) —
+// this is what makes "見底自動暫停" actually mean *before* running a minute
+// the user can't afford, not after. dbChargeCredits's own WHERE credits >=
+// amount makes the charge atomic, so this is safe even if somehow called
+// concurrently for the same user.
+async function chargeNextMinute(session) {
+  if (!session.billingRate || !session.userId) return;
+  const rate = session.billingRate;
+  let newBalance;
+  try {
+    newBalance = await dbChargeCredits(session.userId, rate);
+  } catch (err) {
+    // DB down mid-session: unlike most of this app, billing fails CLOSED —
+    // this feature's entire job is cost containment, so silently letting
+    // recording continue unmetered through an outage would defeat it.
+    console.error(`[billing] charge failed for session ${session.id} (user ${session.userId}), pausing:`, err);
+    autoPauseForInsufficientCredits(session, null);
+    return;
+  }
+  if (newBalance === null) {
+    let credits = null;
+    try { credits = await dbGetUserCredits(session.userId); } catch { /* best-effort for the message only */ }
+    autoPauseForInsufficientCredits(session, credits ?? 0);
+    return;
+  }
+  dbInsertUsageLedger({
+    sessionId: session.id,
+    userId: session.userId,
+    creditsCharged: rate,
+    targetLangCount: session.targetLangs ? session.targetLangs.length : 0,
+    balanceAfter: newBalance,
+  }).catch((err) => {
+    console.error(`[db] failed to record usage_ledger for session ${session.id}:`, err);
+  });
+  send(session.hostWs, { type: 'credits_update', credits: newBalance });
+  maybeWarnLowBalance(session, newBalance);
+}
+
+// Called once per successful host_start (see the WS handler below) — starts
+// the meter for this recording stint at the rate that was just agreed on.
+function startBilling(session, rate) {
+  clearBillingTimer(session); // defensive: never let two timers stack on one session
+  session.billingRate = rate;
+  session.lowBalanceWarned = false;
+  chargeNextMinute(session); // pay for the minute that's about to start
+  session.billingTimer = setInterval(() => chargeNextMinute(session), BILLING_TICK_MS);
+}
+
 const wss = new WebSocketServer({ server });
 
 // Heartbeat: some networks (mobile wifi handoffs, NAT idle timeouts) drop a
@@ -681,7 +948,7 @@ wss.on('connection', (ws) => {
   ws.isAlive = true;
   ws.on('pong', () => { ws.isAlive = true; });
 
-  ws.on('message', (raw) => {
+  ws.on('message', async (raw) => {
     let msg;
     try { msg = JSON.parse(raw); } catch { return; }
 
@@ -695,6 +962,11 @@ wss.on('connection', (ws) => {
         role = 'host';
         sessionId = session.id;
         session.hostWs = ws;
+        // A host reconnect (network blip) must not be mistaken for "host
+        // walked away" — cancel any pending implicit-stop grace timeout from
+        // a previous close (see ws.on('close') below and
+        // BILLING_DISCONNECT_GRACE_MS).
+        clearDisconnectGrace(session);
         console.log(`[host] connected session=${session.id}`);
         sendViewerCount(session);
       } else if (msg.role === 'viewer') {
@@ -737,6 +1009,42 @@ wss.on('connection', (ws) => {
     // mid-session settings change silently never left the host's browser.
     if (role === 'host' && msg.type === 'host_start') {
       if (session.status === 'ended') return; // can't restart an ended session
+
+      // Credit gate (SPEC step 6): computed from what the host is actually
+      // about to (re)start with, same formula as /api/temporary-key's own
+      // check (creditsPerMinuteFor) so the two never disagree about whether
+      // this stint is affordable. A rejection here changes NOTHING about
+      // session/targetLangs/DB state — from the session's point of view it's
+      // as if Start was never pressed. host.js's own pre-check and the
+      // /api/temporary-key 402 are what the host actually sees; this is the
+      // backstop that keeps server-side session state consistent with that.
+      const wantsTargetLangs = msg.translateEnabled && typeof msg.targetLanguage === 'string'
+        ? [msg.targetLanguage]
+        : [];
+      const rate = creditsPerMinuteFor(wantsTargetLangs.length);
+      let credits = null;
+      try {
+        credits = session.userId ? await dbGetUserCredits(session.userId) : null;
+      } catch (err) {
+        console.error(`[db] failed to read credits for user ${session.userId}:`, err);
+      }
+      if (credits === null || credits < rate) {
+        console.log(`[billing] session ${session.id} host_start rejected — user ${session.userId} has ${credits ?? 0} credits, needs ${rate}`);
+        return;
+      }
+
+      // Host clicked Start (SPEC §4 state machine): created → live, exactly
+      // once — a later pause/Start cycle re-sends this while already live, and
+      // must NOT reset startedAt or re-fire dbMarkSessionLive.
+      //
+      // Settings sync (targetLangs/sourceLangs → session object, DB, and the
+      // viewer broadcast below), by contrast, runs on EVERY host_start, first
+      // or not: pausing to change source/target language and pressing Start
+      // again reuses this same session/join_code (SPEC: join_code never
+      // changes), so this is the only place that change can ever reach the
+      // server, the DB record, and already-connected viewers. Previously this
+      // whole block was gated behind the created→live transition, so a
+      // mid-session settings change silently never left the host's browser.
       const firstStart = session.status === 'created';
       if (firstStart) {
         session.status = 'live';
@@ -746,9 +1054,7 @@ wss.on('connection', (ws) => {
       // What the host actually chose, for viewers (session_status, read at
       // join time AND on every subsequent broadcast — see targetLangs
       // comment on the session object) and for the DB record (SPEC §6.5).
-      session.targetLangs = msg.translateEnabled && typeof msg.targetLanguage === 'string'
-        ? [msg.targetLanguage]
-        : [];
+      session.targetLangs = wantsTargetLangs;
       broadcastToViewers(session, { type: 'session_status', status: 'live', targetLangs: session.targetLangs });
       if (firstStart) {
         dbMarkSessionLive(session.id).catch((err) => {
@@ -763,6 +1069,16 @@ wss.on('connection', (ws) => {
       dbSetSessionLanguages(session.id, { sourceLangs, targetLangs: session.targetLangs }).catch((err) => {
         console.error(`[db] failed to record language settings for session ${session.id}:`, err);
       });
+      startBilling(session, rate);
+      return;
+    }
+
+    // New (SPEC step 6): host clicked Pause — mirrors host_start's role for
+    // billing. Doesn't touch session.status/history/viewers at all (that's
+    // the whole point of Pause — see host.js), only stops the meter so a
+    // paused session never keeps getting charged for audio that stopped.
+    if (role === 'host' && msg.type === 'host_stop') {
+      clearBillingTimer(session);
       return;
     }
 
@@ -770,6 +1086,8 @@ wss.on('connection', (ws) => {
     // only stops the mic — see host.js). live/created → ended, permanently:
     // the join_code stops admitting anyone from this point on.
     if (role === 'host' && msg.type === 'host_end_session') {
+      clearBillingTimer(session);
+      clearDisconnectGrace(session);
       if (session.status !== 'ended') {
         session.status = 'ended';
         session.endedAt = Date.now();
@@ -861,6 +1179,21 @@ wss.on('connection', (ws) => {
     if (role === 'host') {
       if (session.hostWs === ws) session.hostWs = null;
       console.log(`[host] disconnected session=${session.id}`);
+      // A dropped app WS does NOT by itself mean recording stopped — Soniox
+      // audio goes straight from the host's browser to Soniox, independent
+      // of this connection, and host.js's own reconnect (≤10s backoff) will
+      // usually re-register long before this fires. Only treat it as "host
+      // actually left" (closed the tab, lost power) after a real grace
+      // period with no reconnect — see BILLING_DISCONNECT_GRACE_MS.
+      if (session.billingTimer) {
+        clearDisconnectGrace(session); // just in case one was already pending
+        session.disconnectGraceTimer = setTimeout(() => {
+          session.disconnectGraceTimer = null;
+          if (session.hostWs) return; // reconnected in the meantime after all
+          console.log(`[billing] session ${session.id} host never reconnected — stopping meter`);
+          clearBillingTimer(session);
+        }, BILLING_DISCONNECT_GRACE_MS);
+      }
     } else if (role === 'viewer') {
       session.viewers.delete(ws);
       console.log(`[viewer-] session=${session.id} total=${session.viewers.size}`);
