@@ -19,10 +19,18 @@ CREATE TABLE IF NOT EXISTS users (
 
 -- Paid credit system (儲值制): a flat integer balance on the user, spent by
 -- the minute while a session is actually recording (see usage_ledger below
--- and server.js's per-minute billing timer). Every new Google account starts
--- at 0 — there is no free allowance, so a brand-new host must top up before
--- they can open a live session at all.
+-- and server.js's per-minute billing timer). New signups get a free 50-point
+-- starter allowance (25 minutes of pure transcription, or ~16-17 minutes
+-- with translation on) so a brand-new host can try the product before ever
+-- having to top up — dbUpsertUserByGoogleSub's INSERT omits `credits`
+-- entirely, so it always falls through to whatever DEFAULT is set below.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS credits INTEGER NOT NULL DEFAULT 0;
+-- Separate ALTER (not just editing the DEFAULT above) because ADD COLUMN IF
+-- NOT EXISTS is a no-op once the column already exists on a previously
+-- migrated DB — this is what actually changes the default there too, not
+-- only on a fresh install. Safe to run on every boot; does not touch any
+-- existing row's balance, only what NEW rows start at.
+ALTER TABLE users ALTER COLUMN credits SET DEFAULT 50;
 
 CREATE TABLE IF NOT EXISTS sessions (
   id                  UUID PRIMARY KEY,
