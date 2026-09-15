@@ -4,6 +4,11 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>開場 — Subtii</title>
+<link rel="icon" href="/favicon.ico" sizes="any" />
+<link rel="icon" href="/favicon-16x16.png" sizes="16x16" type="image/png" />
+<link rel="icon" href="/favicon-32x32.png" sizes="32x32" type="image/png" />
+<link rel="icon" href="/favicon-48x48.png" sizes="48x48" type="image/png" />
+<link rel="apple-touch-icon" href="/apple-touch-icon.png" />
 <link rel="stylesheet" href="/ds.css" />
 <link rel="stylesheet" href="/host.css" />
 </head>
@@ -135,15 +140,47 @@
   <div id="topupPanel" hidden>
     <div class="dialog">
       <div class="dialog-title">儲值</div>
-      <div class="topup-tiers">
-        <button type="button" class="btn btn-secondary topup-tier-btn" data-tier="300">儲值300元 → 300點</button>
-        <button type="button" class="btn btn-secondary topup-tier-btn" data-tier="500">儲值500元 → 530點</button>
-        <button type="button" class="btn btn-secondary topup-tier-btn" data-tier="1000">儲值1000元 → 1100點</button>
+
+      <!-- 步驟1：選方案（只選取，不打 API） -->
+      <div id="topupStepChoose" class="topup-step">
+        <div class="topup-tiers">
+          <button type="button" class="btn btn-secondary topup-tier-btn" data-tier="300" data-credits="300">付 NT$300 → 300 點</button>
+          <button type="button" class="btn btn-secondary topup-tier-btn" data-tier="500" data-credits="530">付 NT$500 → 530 點</button>
+          <button type="button" class="btn btn-secondary topup-tier-btn" data-tier="1000" data-credits="1100">付 NT$1,000 → 1,100 點</button>
+        </div>
       </div>
-      <div id="orderInfo" class="dialog-body" hidden>
-        <p>訂單編號：<code id="orderIdText"></code></p>
-        <p>請匯款 <strong id="orderAmountText"></strong> 元至：<br />808 玉山銀行 民權分行 / 南隅有限公司 / 0598-940-168796</p>
-        <p>轉帳完成後，請回填帳號後五碼以便核對入帳：</p>
+
+      <!-- 步驟1.5：確認方案，按下「確認」才建立訂單 -->
+      <div id="topupStepConfirm" class="topup-step" hidden>
+        <div class="topup-confirm-summary">
+          <div>匯款 <strong id="confirmAmountText" class="m"></strong> 元</div>
+          <div class="text-muted">→ 到帳 <strong id="confirmCreditsText" class="m"></strong> 點</div>
+        </div>
+        <div class="dialog-actions">
+          <button type="button" id="backToChooseBtn" class="btn btn-secondary">重新選擇</button>
+          <button type="button" id="confirmCreateOrderBtn" class="btn btn-primary">確認，建立訂單</button>
+        </div>
+        <span id="createOrderStatusText" class="m text-muted"></span>
+      </div>
+
+      <!-- 步驟2：建單成功後才顯示的匯款資訊 -->
+      <div id="orderInfo" class="topup-step" hidden>
+        <div class="topup-field-row">
+          <span class="topup-field-label">訂單編號</span>
+          <span id="orderIdText" class="m topup-field-value"></span>
+          <button type="button" class="btn btn-secondary btn-sm copyBtn" data-copy-target="orderIdText">複製</button>
+        </div>
+        <div class="topup-field-row">
+          <span class="topup-field-label">應匯金額</span>
+          <span id="orderAmountText" class="m topup-field-value"></span>
+          <button type="button" class="btn btn-secondary btn-sm copyBtn" data-copy-target="orderAmountText">複製</button>
+        </div>
+        <div class="topup-field-row">
+          <span class="topup-field-label">匯款帳戶</span>
+          <span id="orderBankInfoText" class="m topup-field-value"></span>
+          <button type="button" class="btn btn-secondary btn-sm copyBtn" data-copy-target="orderBankInfoText">複製</button>
+        </div>
+        <p class="topup-hint">轉帳完成後，請回填帳號後五碼以便核對入帳：</p>
         <div class="topup-lastfive-row">
           <label for="lastFiveInput">後五碼</label>
           <input id="lastFiveInput" class="input" type="text" inputmode="numeric" maxlength="5" placeholder="12345" />
@@ -151,6 +188,7 @@
         </div>
         <span id="orderStatusText" class="m text-muted"></span>
       </div>
+
       <div class="dialog-actions">
         <button type="button" id="closeTopupBtn" class="btn btn-secondary">關閉</button>
       </div>

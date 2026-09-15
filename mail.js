@@ -51,3 +51,32 @@ export async function sendOrderNotificationEmail({ order, user }) {
     console.error(`[mail] failed to send order notification for order ${order.id}:`, err);
   }
 }
+
+// Called once, right when the order is first created (POST /api/orders) —
+// before the host has necessarily even transferred anything. Distinct from
+// sendOrderNotificationEmail above (that one fires on the last-five
+// confirmation, i.e. "please go check the bank statement now"); this one is
+// just "heads up, a new order exists and is waiting on a transfer". Same
+// fire-and-forget contract: a send failure must never affect order creation
+// (SPEC: "寄信失敗只 log,不中斷下單"), so this never throws.
+export async function sendOrderCreatedEmail({ order, user }) {
+  if (!transporter) return;
+  const subject = `[即時字幕儲值] 新訂單/等待轉帳 — 訂單 ${order.id}`;
+  const text = [
+    `訂單編號：${order.id}`,
+    `使用者：${user.name || '(無名稱)'} <${user.email || '(無 email)'}>`,
+    `應匯金額：${order.amount_paid} 元`,
+    `到帳點數：${order.credits_to_add} 點`,
+    `下單時間：${order.created_at}`,
+  ].join('\n');
+  try {
+    await transporter.sendMail({
+      from: process.env.SMTP_FROM || process.env.SMTP_USER,
+      to: NOTIFY_TO,
+      subject,
+      text,
+    });
+  } catch (err) {
+    console.error(`[mail] failed to send order-created notification for order ${order.id}:`, err);
+  }
+}

@@ -37,7 +37,7 @@ import {
   dbInsertUsageLedger,
 } from './db.js';
 import { runTranscriptCleanup } from './transcript-cleanup.js';
-import { sendOrderNotificationEmail } from './mail.js';
+import { sendOrderNotificationEmail, sendOrderCreatedEmail } from './mail.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 8787;
@@ -676,6 +676,12 @@ app.post('/api/orders', requireLoginApi, async (req, res) => {
     creditsToAdd: order.credits_to_add,
     status: order.status,
     bankInfo: BANK_INFO,
+  });
+  // Fire-and-forget, same contract as the last-five notification below — a
+  // send failure must never affect the order the response above already
+  // confirmed (SPEC: "寄信失敗只 log,不中斷下單").
+  sendOrderCreatedEmail({ order, user: req.user }).catch((err) => {
+    console.error(`[mail] unexpected failure notifying about new order ${order.id}:`, err);
   });
 });
 

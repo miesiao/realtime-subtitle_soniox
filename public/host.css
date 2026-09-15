@@ -111,8 +111,24 @@ a:hover { text-decoration: underline; }
   position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: var(--space-4);
   background: color-mix(in srgb, var(--color-neutral-900) 65%, transparent);
 }
+.topup-step[hidden] { display: none; }
 .topup-tiers { display: flex; flex-direction: column; gap: var(--space-2); }
-.topup-lastfive-row { display: flex; align-items: center; gap: var(--space-2); }
+
+.topup-confirm-summary {
+  display: flex; flex-direction: column; gap: var(--space-1);
+  padding: var(--space-4); background: var(--color-neutral-800); border-radius: var(--radius-md);
+  font-size: 15px; margin-bottom: var(--space-3);
+}
+
+.topup-field-row {
+  display: grid; grid-template-columns: 88px 1fr auto; align-items: center; gap: var(--space-3);
+  padding: var(--space-2) 0; border-bottom: 1px solid var(--color-divider);
+}
+.topup-field-label { font-size: 12px; color: color-mix(in srgb, var(--color-text) 65%, transparent); }
+.topup-field-value { font-size: 13px; word-break: break-word; }
+.topup-hint { font-size: 13px; margin: var(--space-3) 0 0; }
+
+.topup-lastfive-row { display: flex; align-items: center; gap: var(--space-2); margin-top: var(--space-2); }
 .topup-lastfive-row input { max-width: 100px; }
 
 @media (max-width: 960px) {

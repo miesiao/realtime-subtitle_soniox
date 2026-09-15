@@ -117,9 +117,18 @@ const creditsDisplayEl = document.getElementById('creditsDisplay');
 const topupToggleBtn = document.getElementById('topupToggleBtn');
 const topupPanelEl = document.getElementById('topupPanel');
 const topupTierBtns = document.querySelectorAll('.topup-tier-btn');
+const topupStepChooseEl = document.getElementById('topupStepChoose');
+const topupStepConfirmEl = document.getElementById('topupStepConfirm');
+const confirmAmountTextEl = document.getElementById('confirmAmountText');
+const confirmCreditsTextEl = document.getElementById('confirmCreditsText');
+const backToChooseBtn = document.getElementById('backToChooseBtn');
+const confirmCreateOrderBtn = document.getElementById('confirmCreateOrderBtn');
+const createOrderStatusTextEl = document.getElementById('createOrderStatusText');
 const orderInfoEl = document.getElementById('orderInfo');
 const orderIdTextEl = document.getElementById('orderIdText');
 const orderAmountTextEl = document.getElementById('orderAmountText');
+const orderBankInfoTextEl = document.getElementById('orderBankInfoText');
+const copyBtns = document.querySelectorAll('.copyBtn');
 const lastFiveInputEl = document.getElementById('lastFiveInput');
 const submitLastFiveBtn = document.getElementById('submitLastFiveBtn');
 const orderStatusTextEl = document.getElementById('orderStatusText');
@@ -186,8 +195,33 @@ function currentRequiredCreditsPerMinute() {
   return 2 + (translateEnabledEl.checked ? 1 : 0);
 }
 
+// --- Top-up wizard: 選方案 → 確認方案 → (建單後)匯款資訊 ---------------------
+// Picking a tier is just a client-side selection — nothing hits the network
+// until the host explicitly presses "確認，建立訂單" on the confirm step, so
+// idle browsing of the price list never creates a pending order in the DB.
+let selectedTier = null; // { tier, credits } — set on step 1, read on confirm
+
+function showTopupStep(step) {
+  topupStepChooseEl.hidden = step !== 'choose';
+  topupStepConfirmEl.hidden = step !== 'confirm';
+  orderInfoEl.hidden = step !== 'payment';
+}
+
+// Every fresh open of the panel starts over at step 1 — otherwise a host who
+// closes it mid-flow (or right after finishing one order) would reopen it
+// straight into stale confirm/payment-step leftovers from last time.
+function resetTopupWizard() {
+  selectedTier = null;
+  createOrderStatusTextEl.textContent = '';
+  orderStatusTextEl.textContent = '';
+  lastFiveInputEl.value = '';
+  showTopupStep('choose');
+}
+
 topupToggleBtn.addEventListener('click', () => {
+  const opening = topupPanelEl.hidden;
   topupPanelEl.hidden = !topupPanelEl.hidden;
+  if (opening) resetTopupWizard();
 });
 // Dialog chrome (design 2h): a dedicated close button and a click on the
 // backdrop itself (but not the card) both just hide the same panel — same
@@ -202,29 +236,67 @@ topupPanelEl.addEventListener('click', (e) => {
 // the top bar's 儲值 button.
 document.getElementById('lowBalanceTopupBtn')?.addEventListener('click', () => {
   topupPanelEl.hidden = false;
+  resetTopupWizard();
 });
 
+// Step 1 → 1.5: select only, no API call.
 for (const btn of topupTierBtns) {
+  btn.addEventListener('click', () => {
+    selectedTier = { tier: Number(btn.dataset.tier), credits: Number(btn.dataset.credits) };
+    confirmAmountTextEl.textContent = `NT$${selectedTier.tier}`;
+    confirmCreditsTextEl.textContent = String(selectedTier.credits);
+    createOrderStatusTextEl.textContent = '';
+    showTopupStep('confirm');
+  });
+}
+
+backToChooseBtn.addEventListener('click', () => {
+  showTopupStep('choose');
+});
+
+// Step 1.5 → 2: the only place that actually calls POST /api/orders.
+confirmCreateOrderBtn.addEventListener('click', async () => {
+  if (!selectedTier) return;
+  confirmCreateOrderBtn.disabled = true;
+  backToChooseBtn.disabled = true;
+  createOrderStatusTextEl.textContent = '建立訂單中…';
+  try {
+    const order = await apiFetchJson('/api/orders', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tier: selectedTier.tier }),
+    });
+    orderIdTextEl.textContent = order.id;
+    orderAmountTextEl.textContent = `NT$${order.amountPaid}`;
+    // bankInfo comes from the order response, not a hardcoded string here —
+    // server.js's BANK_INFO constant is the single source of truth.
+    orderBankInfoTextEl.textContent = order.bankInfo;
+    lastFiveInputEl.value = '';
+    orderStatusTextEl.textContent = '';
+    orderInfoEl.dataset.orderId = order.id;
+    showTopupStep('payment');
+  } catch (err) {
+    console.error('Failed to create order:', err);
+    createOrderStatusTextEl.textContent = `建立訂單失敗：${err.message}`;
+  } finally {
+    confirmCreateOrderBtn.disabled = false;
+    backToChooseBtn.disabled = false;
+  }
+});
+
+// Copy-to-clipboard on each payment-info field — best-effort: a blocked
+// clipboard (permissions, insecure context) just silently does nothing.
+for (const btn of copyBtns) {
+  const original = btn.textContent;
   btn.addEventListener('click', async () => {
-    for (const b of topupTierBtns) b.disabled = true;
-    orderStatusTextEl.textContent = '建立訂單中…';
+    const text = document.getElementById(btn.dataset.copyTarget)?.textContent || '';
+    if (!text || !navigator.clipboard) return;
     try {
-      const order = await apiFetchJson('/api/orders', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tier: Number(btn.dataset.tier) }),
-      });
-      orderIdTextEl.textContent = order.id;
-      orderAmountTextEl.textContent = order.amountPaid;
-      lastFiveInputEl.value = '';
-      orderStatusTextEl.textContent = '';
-      orderInfoEl.hidden = false;
-      orderInfoEl.dataset.orderId = order.id;
-    } catch (err) {
-      console.error('Failed to create order:', err);
-      orderStatusTextEl.textContent = `建立訂單失敗：${err.message}`;
-    } finally {
-      for (const b of topupTierBtns) b.disabled = false;
+      await navigator.clipboard.writeText(text);
+      btn.textContent = '已複製';
+      setTimeout(() => { btn.textContent = original; }, 1200);
+    } catch {
+      // Clipboard blocked — no-op per spec.
     }
   });
 }
