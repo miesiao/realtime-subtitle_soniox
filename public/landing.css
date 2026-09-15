@@ -42,12 +42,9 @@ main { max-width: 1180px; margin: 0 auto; padding: 0 var(--space-4); }
 
 .pricing { padding: var(--space-8) 0; border-bottom: 2px solid var(--color-divider); }
 .pricing-head { margin-bottom: var(--space-6); }
-.pricing-tiers { display: grid; grid-template-columns: repeat(3, 1fr); gap: 2px; background: var(--color-divider); }
-.pricing-tier { background: var(--color-surface); padding: var(--space-6); }
-.pricing-tier-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: var(--space-2); }
-.pricing-tier--featured { box-shadow: inset 0 0 0 2px var(--color-accent); }
-.pricing-amount { font-size: 40px; font-weight: 800; line-height: 1; }
-.pricing-amount span { font-size: 15px; font-weight: 400; color: color-mix(in srgb, var(--color-text) 60%, transparent); }
+/* .pricing-tiers/.pricing-tier* themselves live in ds.css now — host's top-up
+   step 1 reuses the exact same classes (see host.html/host.css) instead of
+   its own copy. */
 .pricing-detail { display: flex; gap: var(--space-8); margin-top: var(--space-6); align-items: flex-start; flex-wrap: wrap; }
 .pricing-formula { flex: 1; min-width: 240px; }
 .formula { font-size: 19px; font-weight: 600; color: var(--color-accent-700); }
@@ -68,7 +65,6 @@ main { max-width: 1180px; margin: 0 auto; padding: 0 var(--space-4); }
   .hero h1 { font-size: 34px; }
   .usecases { grid-template-columns: 1fr; }
   .how-steps { grid-template-columns: 1fr; }
-  .pricing-tiers { grid-template-columns: 1fr; }
   .pricing-detail { flex-direction: column; }
   .closer h2 { font-size: 28px; }
 }

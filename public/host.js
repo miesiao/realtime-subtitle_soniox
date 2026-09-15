@@ -110,9 +110,12 @@ const transcriptTextEl = document.getElementById('transcriptText');
 const retryTranscriptBtn = document.getElementById('retryTranscriptBtn');
 const downloadTranscriptBtn = document.getElementById('downloadTranscriptBtn');
 const whoAmIEl = document.getElementById('whoAmI');
+const hostLogoLinkEl = document.getElementById('hostLogoLink');
 const creditsPausedBannerEl = document.getElementById('creditsPausedBanner');
 const lowBalanceBannerEl = document.getElementById('lowBalanceBanner');
 const lowBalanceMinutesEl = document.getElementById('lowBalanceMinutes');
+const creditsChipEl = document.getElementById('creditsChip');
+const creditsChipGuestEl = document.getElementById('creditsChipGuest');
 const creditsDisplayEl = document.getElementById('creditsDisplay');
 const topupToggleBtn = document.getElementById('topupToggleBtn');
 const topupPanelEl = document.getElementById('topupPanel');
@@ -133,11 +136,14 @@ const lastFiveInputEl = document.getElementById('lastFiveInput');
 const submitLastFiveBtn = document.getElementById('submitLastFiveBtn');
 const orderStatusTextEl = document.getElementById('orderStatusText');
 
-// --- Login status (SPEC §3a) ------------------------------------------------
-// This page is server-side login-gated (GET /host redirects to Google if
-// you're signed out), so by the time this script runs there should already
-// be a session cookie — this is just for display, plus a fallback redirect
-// in the unlikely case the cookie expired between page load and this fetch.
+// --- Login status (SPEC guest-mode) -----------------------------------------
+// /host no longer requires login server-side (GET /host doesn't redirect a
+// signed-out visitor away) — this is what actually decides whether the page
+// is running in guest mode or not. /api/me itself now answers 200
+// { guest: true } rather than 401 for a signed-out caller (see server.js),
+// specifically so this branch never fires a redirect on its own; only
+// Start and "確認，建立訂單" ever send a guest to login, and only when
+// they're actually pressed (see their handlers below).
 function redirectToLogin() {
   location.href = `/auth/google?returnTo=${encodeURIComponent(location.pathname)}`;
 }
@@ -155,10 +161,48 @@ async function apiFetchJson(url, options = {}) {
   return res.json();
 }
 
+// Set once loadWhoAmI resolves; read by Start / confirmCreateOrderBtn (both
+// redirect to login immediately instead of ever hitting a 401) and by the
+// credits chip / whoAmI display below.
+let isGuest = false;
+// Cosmetic only ("訪客" + a random tag, SPEC: "顯示「訪客」加一組隨機代號") —
+// stable for the life of this tab/reload via sessionStorage, so it doesn't
+// change every time loadWhoAmI happens to re-run.
+const GUEST_TAG_STORAGE_KEY = 'guestTag';
+function getOrCreateGuestTag() {
+  let tag = sessionStorage.getItem(GUEST_TAG_STORAGE_KEY);
+  if (!tag) {
+    tag = Math.random().toString(36).slice(2, 8).toUpperCase();
+    sessionStorage.setItem(GUEST_TAG_STORAGE_KEY, tag);
+  }
+  return tag;
+}
+
+// Deliberately fire-and-forget (not top-level awaited) — same as before this
+// change — so it never delays wiring up every other button handler below.
+// isGuest is a `let` in this module's scope, so every closure that reads it
+// (Start, confirmCreateOrderBtn, hostLogoLink...) always sees its current
+// value at the moment of the actual click/interaction, which — human
+// reaction time being what it is — is always well after this same-origin
+// fetch has resolved. refreshCredits() is deliberately called from inside
+// here rather than as its own unconditional top-level statement (see below):
+// that statement would otherwise run before this async function's first
+// await resolves, while isGuest is still its default `false`, and fire an
+// unwanted /api/credits call — and 401 redirect — for an actual guest.
 async function loadWhoAmI() {
   try {
     const me = await apiFetchJson('/api/me');
-    whoAmIEl.textContent = `登入身分：${me.name || me.email || me.id}`;
+    if (me.guest) {
+      isGuest = true;
+      whoAmIEl.textContent = `登入身分：訪客 #${getOrCreateGuestTag()}`;
+      // No real balance to show a guest (SPEC: "不要顯示假餘額") — a badge
+      // inviting signup replaces the credits chip entirely.
+      creditsChipEl.hidden = true;
+      creditsChipGuestEl.hidden = false;
+    } else {
+      whoAmIEl.textContent = `登入身分：${me.name || me.email || me.id}`;
+      refreshCredits();
+    }
   } catch (err) {
     if (err.message !== 'login_required') whoAmIEl.textContent = `無法確認登入狀態：${err.message}`;
   }
@@ -186,7 +230,11 @@ async function refreshCredits() {
     if (err.message !== 'login_required') console.error('Failed to load credits:', err);
   }
 }
-refreshCredits();
+// Not called unconditionally here — see loadWhoAmI above, which calls this
+// itself only once it knows the caller isn't a guest. /api/credits still
+// requires login (unchanged); a guest has no balance to show
+// (creditsChipGuestEl covers that instead) and must never trigger
+// apiFetchJson's 401-redirect-to-login just from loading the page.
 
 // Same formula as server.js's creditsPerMinuteFor — kept in sync by hand
 // since this is only ever a pre-flight courtesy check; /api/temporary-key
@@ -257,6 +305,14 @@ backToChooseBtn.addEventListener('click', () => {
 // Step 1.5 → 2: the only place that actually calls POST /api/orders.
 confirmCreateOrderBtn.addEventListener('click', async () => {
   if (!selectedTier) return;
+  // Guest-mode (SPEC): judge this BEFORE ever sending the request, not after
+  // eating a 401 — /api/orders itself still requires login (unchanged), this
+  // is purely so a guest gets sent straight to login instead of a confusing
+  // "建立訂單失敗" message first.
+  if (isGuest) {
+    location.href = `/auth/google?returnTo=${encodeURIComponent(location.pathname)}`;
+    return;
+  }
   confirmCreateOrderBtn.disabled = true;
   backToChooseBtn.disabled = true;
   createOrderStatusTextEl.textContent = '建立訂單中…';
@@ -268,9 +324,15 @@ confirmCreateOrderBtn.addEventListener('click', async () => {
     });
     orderIdTextEl.textContent = order.id;
     orderAmountTextEl.textContent = `NT$${order.amountPaid}`;
-    // bankInfo comes from the order response, not a hardcoded string here —
-    // server.js's BANK_INFO constant is the single source of truth.
+    // bankInfo/bankAccount come from the order response, not a hardcoded
+    // string here — server.js's BANK_INFO/BANK_ACCOUNT_NUMBER constants are
+    // the single source of truth. orderBankInfoTextEl shows all 3 lines
+    // (white-space: pre-line, see host.css); the copy button on this field
+    // copies only the bare account number (data-copy-account), never the
+    // whole 3-line block.
     orderBankInfoTextEl.textContent = order.bankInfo;
+    const bankCopyBtn = document.querySelector('[data-copy-target="orderBankInfoText"]');
+    if (bankCopyBtn) bankCopyBtn.dataset.copyAccount = order.bankAccount;
     lastFiveInputEl.value = '';
     orderStatusTextEl.textContent = '';
     orderInfoEl.dataset.orderId = order.id;
@@ -289,7 +351,12 @@ confirmCreateOrderBtn.addEventListener('click', async () => {
 for (const btn of copyBtns) {
   const original = btn.textContent;
   btn.addEventListener('click', async () => {
-    const text = document.getElementById(btn.dataset.copyTarget)?.textContent || '';
+    // The 匯款帳戶 button copies only the bare account number
+    // (data-copy-account, set once the order response arrives — see
+    // confirmCreateOrderBtn above), never the full 3-line bank info text
+    // that's actually displayed. Every other copy button has no
+    // data-copy-account, so this just falls through to its usual target text.
+    const text = btn.dataset.copyAccount || document.getElementById(btn.dataset.copyTarget)?.textContent || '';
     if (!text || !navigator.clipboard) return;
     try {
       await navigator.clipboard.writeText(text);
@@ -508,7 +575,7 @@ function connectWs() {
 let currentSession = null; // { id, joinCode, viewerUrl, qrDataUrl }
 
 // /host now operates on ONE EXISTING session, created explicitly by the
-// "＋ 開新場次" button on 字幕間 (POST /api/sessions happens there, not
+// "＋ 開新場次" button on 字幕場次 (POST /api/sessions happens there, not
 // here) — loading/refreshing this page must never create a new session on
 // its own, or every visit leaves behind another zombie `created` row. The
 // session id travels in the URL (?id=...) from that button's redirect.
@@ -625,16 +692,34 @@ retryTranscriptBtn.addEventListener('click', async () => {
 // from ever running (WS connect, Start/Stop/End wiring, all of it), leaving
 // a host staring at a page that looks loaded but does nothing, with no
 // visible error. So this is caught, surfaced on-page, and retryable instead.
+// Mirrors currentSession.status — read by hostLogoLink's click handler
+// (below) to decide whether leaving needs a confirm(). Kept as its own flag
+// rather than re-reading currentSession.status every time, since it also
+// needs updating from host_start/host_end_session's own optimistic client
+// state, not just from the server's GET response.
+let sessionIsLive = false;
+
 async function initSession() {
   if (!sessionId) {
-    joinCodeEl.textContent = '（缺少場次 id）';
-    sessionErrorTextEl.textContent = '缺少場次 id，請從「字幕間」清單點「回到控場」或「＋ 開新場次」進入這個頁面。';
+    // Guest-mode (SPEC): a guest visiting /host with no session id isn't an
+    // error to fix — they simply haven't logged in to create one yet. A
+    // logged-in host with no id really is missing one (SPEC naming fix:
+    // the list page is now called 字幕場次, not 字幕間).
+    joinCodeEl.textContent = isGuest ? '（登入後即可建立場次）' : '（缺少場次 id）';
+    sessionErrorTextEl.textContent = isGuest
+      ? '訪客模式僅能預覽設定與儲值方案；註冊登入後即可建立場次、取得 QR code。'
+      : '缺少場次 id，請從「字幕場次」清單點「回到控場」或「＋ 開新場次」進入這個頁面。';
     sessionErrorEl.hidden = false;
     return;
   }
   try {
     currentSession = await loadSession(sessionId);
     renderSession(currentSession);
+    // 'paused' (server auto-paused after a lost host connection — see
+    // server.js's endSession/dbMarkSessionPaused) still counts as "in
+    // progress" for the logo-click confirm below: the join_code and viewer
+    // history are still live, only the host's own connection dropped.
+    sessionIsLive = currentSession.status === 'live' || currentSession.status === 'paused';
     sessionErrorEl.hidden = true;
     connectWs();
   } catch (err) {
@@ -1113,6 +1198,14 @@ function startRecording() {
 }
 
 startBtn.addEventListener('click', async () => {
+  // Guest-mode (SPEC): Start always goes straight to login for a guest,
+  // never attempts to open a Soniox recording session first — checked before
+  // any other validation below, so a guest never sees a mic-permission
+  // prompt or any other Start side effect before being sent to log in.
+  if (isGuest) {
+    location.href = `/auth/google?returnTo=${encodeURIComponent(location.pathname)}`;
+    return;
+  }
   // Boundary case (SPEC point 3): block Start rather than silently falling
   // back to "no hints" if nothing is checked and auto-detect isn't chosen.
   const sourceSelection = currentSourceLangSelection();
@@ -1143,6 +1236,7 @@ startBtn.addEventListener('click', async () => {
   // The server independently re-derives and re-checks the credit rate from
   // these same fields before actually starting its billing timer (SPEC step
   // 6) — see server.js's host_start handler.
+  sessionIsLive = true; // this session is now "in progress" — see hostLogoLink below
   if (ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({
       type: 'host_start',
@@ -1202,10 +1296,21 @@ endSessionBtn.addEventListener('click', async () => {
   if (ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: 'host_end_session' }));
   }
+  sessionIsLive = false; // already confirmed above — logo click needs no second confirm now
   startBtn.disabled = true;
   stopBtn.disabled = true;
   clearBtn.disabled = true;
   endSessionBtn.disabled = true;
   statusEl.textContent = 'session ended';
   startTranscriptPolling();
+});
+
+// Logo → home (design: 各頁 logo 可回首頁). host's one rule: while the
+// session is actually in progress, clicking it must confirm first — unlike
+// every other page's logo, leaving here mid-broadcast can strand viewers
+// without anyone noticing the tab is gone.
+hostLogoLinkEl?.addEventListener('click', (e) => {
+  if (!sessionIsLive) return; // not live — just let the <a href="/"> navigate normally
+  e.preventDefault();
+  if (confirm('本場仍在進行，確定離開？')) location.href = '/';
 });

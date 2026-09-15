@@ -36,6 +36,12 @@ CREATE TABLE IF NOT EXISTS sessions (
   id                  UUID PRIMARY KEY,
   join_code           TEXT UNIQUE NOT NULL,
   name                TEXT,
+  -- 'created' | 'live' | 'paused' | 'ended'. 'paused' (added for the
+  -- "場次沒結束一直掛 live" fix) is server-driven, not host-chosen: it means
+  -- the host's app WS disconnected and never reconnected within
+  -- BILLING_DISCONNECT_GRACE_MS — join_code and history survive, and
+  -- pressing Start again resumes straight back to 'live' (see server.js's
+  -- dbMarkSessionPaused/dbMarkSessionResumed).
   status              TEXT NOT NULL DEFAULT 'created',
   source_lang         TEXT, -- superseded by source_langs below; unused, left in place
   target_langs        TEXT[],

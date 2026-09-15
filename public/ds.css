@@ -155,6 +155,12 @@ textarea.input { min-height: 70px; resize: vertical; }
 .nav-brand { font-family: var(--font-heading); font-weight: 800; font-size: 18px; margin-right: auto; display: flex; align-items: center; gap: 8px; }
 .nav a { color: inherit; text-decoration: none; font-size: 14px; }
 .nav a:hover { color: var(--color-accent); }
+/* The logo lockup is also an <a href="/"> (each page can return home) — tie-
+   broken (same specificity as .nav a / .nav a:hover, later in source order)
+   so it keeps its own 18px/800-weight sizing instead of the generic nav
+   link's 14px, while still picking up a nice accent color on hover. */
+.nav a.nav-brand { font-size: 18px; }
+.nav a.nav-brand:hover { color: inherit; }
 
 /* — tables — */
 .table { width: 100%; border-collapse: collapse; font-size: 14px; }
@@ -198,7 +204,26 @@ textarea.input { min-height: 70px; resize: vertical; }
 .brand-mark--lg { --mark-size: 64px; }
 .brand-mark--xl { --mark-size: 86px; }
 
+/* — pricing tier cards — shared by landing's #pricing and host's top-up step
+   1 (host.html), so both ever have exactly one definition of this look. Host
+   renders these as <button> elements instead of landing's plain <div>s (the
+   tier itself is the click target there) — .topup-tier-btn in host.css only
+   resets the button-element defaults these rules don't already cover
+   (border/font/text-align/cursor), the actual card look lives here. */
+.pricing-tiers { display: grid; grid-template-columns: repeat(3, 1fr); gap: 2px; background: var(--color-divider); }
+.pricing-tier { background: var(--color-surface); padding: var(--space-6); }
+.pricing-tier-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: var(--space-2); }
+.pricing-tier--featured { box-shadow: inset 0 0 0 2px var(--color-accent); }
+.pricing-amount { font-size: 40px; font-weight: 800; line-height: 1; }
+.pricing-amount span { font-size: 15px; font-weight: 400; color: color-mix(in srgb, var(--color-text) 60%, transparent); }
+@media (max-width: 720px) {
+  .pricing-tiers { grid-template-columns: 1fr; }
+}
+
 .brand-lockup { display: inline-flex; align-items: baseline; gap: 8px; }
 .brand-lockup .brand-name { font-weight: 800; }
-.brand-lockup .brand-suffix { font-weight: 400; font-size: 0.75em; color: var(--color-neutral-700); }
-.theme-dark .brand-lockup .brand-suffix { color: var(--color-neutral-300); }
+/* Reference lockup (temp/1.png, temp/2.png): "開字幕" reads at the same bold
+   weight and near-black ink as "Subtii", not as a smaller muted caption —
+   matched here instead of the old lighter/smaller treatment. */
+.brand-lockup .brand-suffix { font-weight: 800; font-size: 0.85em; color: inherit; }
+.brand-lockup .brand-name-accent { color: var(--color-accent); }

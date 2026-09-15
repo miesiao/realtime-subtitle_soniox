@@ -32,6 +32,16 @@ a:hover { text-decoration: underline; }
 #wsStatus { color: var(--color-accent-400); }
 .credits-chip { color: var(--color-accent-400); }
 
+/* Logo (design: 各頁 logo 可回首頁) — host didn't have a brand-lockup at all
+   before; unlike other pages this one is intercepted in JS when the session
+   is actually live (see hostLogoLink's click handler in host.js) so a host
+   mid-broadcast gets a confirm() instead of silently navigating away.
+   Unlike landing/sessions's lockup (inside .nav, where ".nav a{color:
+   inherit}" already wins over ds.css's generic accent-colored `a`), this one
+   sits in .host-topbar-row with no such rule — reset explicitly here so
+   "Subtii" renders in the theme's text color, not link-red. */
+.host-logo-link, .host-logo-link:hover { color: inherit; cursor: pointer; }
+
 /* — control row — */
 .control-row {
   display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap;
@@ -111,8 +121,17 @@ a:hover { text-decoration: underline; }
   position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: var(--space-4);
   background: color-mix(in srgb, var(--color-neutral-900) 65%, transparent);
 }
+/* Wider than ds.css's default 440px dialog — needed so the 3 pricing-tier
+   cards (shared with landing's #pricing, see ds.css) have room to sit
+   side by side instead of a 440px dialog squeezing them illegibly. */
+#topupPanel .dialog { width: min(640px, 100%); }
 .topup-step[hidden] { display: none; }
-.topup-tiers { display: flex; flex-direction: column; gap: var(--space-2); }
+/* Step 1 tiers are <button>s wearing landing's .pricing-tier look (ds.css) —
+   this only resets what a bare <button> element adds on top of that
+   (border/font/text-align/cursor/width), never the look itself. */
+.topup-tier-btn.pricing-tier { border: none; text-align: left; font: inherit; color: inherit; cursor: pointer; width: 100%; }
+.topup-tiers .pricing-tier { padding: var(--space-4); }
+.topup-tiers .pricing-amount { font-size: 32px; }
 
 .topup-confirm-summary {
   display: flex; flex-direction: column; gap: var(--space-1);
@@ -126,6 +145,9 @@ a:hover { text-decoration: underline; }
 }
 .topup-field-label { font-size: 12px; color: color-mix(in srgb, var(--color-text) 65%, transparent); }
 .topup-field-value { font-size: 13px; word-break: break-word; }
+/* BANK_INFO (server.js) is 3 lines joined with \n — pre-line so they render
+   as 3 separate lines here instead of collapsing to one. */
+.topup-bank-lines { white-space: pre-line; line-height: 1.6; }
 .topup-hint { font-size: 13px; margin: var(--space-3) 0 0; }
 
 .topup-lastfive-row { display: flex; align-items: center; gap: var(--space-2); margin-top: var(--space-2); }

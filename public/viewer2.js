@@ -37,7 +37,9 @@ function showSessionOverlay({ tag, tagClass = 'tag-accent', title, subtitle, bod
 
   const head = document.createElement('div');
   head.className = 'overlay-head';
-  head.innerHTML = '<span class="brand-lockup"><span class="brand-mark brand-mark--sm" aria-hidden="true"></span><span class="brand-name">Subtii</span></span>';
+  // A viewer's logo just goes home directly, no confirm — unlike host's (see
+  // host.js), leaving this page mid-session costs the viewer nothing.
+  head.innerHTML = '<a href="/" class="brand-lockup"><span class="brand-mark brand-mark--sm" aria-hidden="true"></span><span class="brand-name">Subtii</span></a>';
   if (joinCode) {
     const code = document.createElement('span');
     code.className = 'm text-muted overlay-code';
@@ -430,6 +432,17 @@ function connect() {
           tag: '尚未開始',
           title: msg.name || '這場字幕',
           body: '講者一開播，這個畫面會自動跳成字幕。不用重新整理，手機放著就好。',
+        });
+      } else if (msg.status === 'paused') {
+        // Server-driven auto-pause (SPEC fix "場次沒結束一直掛 live"): the
+        // host's connection dropped and didn't come back in time — distinct
+        // from 'ended', this is expected to resume, so it reads as a
+        // temporary lull rather than a hard stop.
+        showSessionOverlay({
+          tag: '暫停中',
+          tagClass: 'tag-neutral',
+          title: msg.name || '這場字幕',
+          body: '主辦單位暫時離線，字幕先暫停。請留在這個畫面，恢復後會自動繼續。',
         });
       } else if (msg.status === 'ended') {
         showSessionOverlay({

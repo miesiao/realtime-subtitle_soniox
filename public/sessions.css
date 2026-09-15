@@ -43,12 +43,17 @@ body.theme-dark { min-height: 100vh; }
 .tag:empty { display: none; }
 .statusBadge[data-status="live"] { background: var(--color-accent); color: var(--color-bg); }
 .statusBadge[data-status="created"] { background: var(--color-neutral-700); color: var(--color-neutral-100); }
+.statusBadge[data-status="paused"] { background: var(--color-neutral-700); color: var(--color-accent-400); }
 .statusBadge[data-status="ended"] { background: var(--color-neutral-700); color: var(--color-neutral-300); }
 .processingBadge[data-processing="ready"] { border: 1px solid var(--color-accent-400); color: var(--color-accent-400); background: none; }
 .processingBadge[data-processing="processing"] { background: var(--color-neutral-800); color: var(--color-neutral-100); }
 .processingBadge[data-processing="failed"] { background: var(--color-accent-700); color: var(--color-bg); }
 .createdAt { margin-left: auto; }
 .openBtn { font-size: 12px; padding: 4px 10px; }
+.endBtn { font-size: 12px; padding: 4px 10px; border-color: var(--color-accent-700); color: var(--color-accent-400); }
+.endBtn:hover { background: color-mix(in srgb, var(--color-accent-400) 12%, transparent); }
+.endBtn:disabled { opacity: 0.5; cursor: not-allowed; }
+.endBtn[hidden] { display: none; }
 .deleteBtn { font-size: 12px; padding: 4px 10px; border-color: var(--color-accent-700); color: var(--color-accent-400); }
 .deleteBtn:hover { background: color-mix(in srgb, var(--color-accent-400) 12%, transparent); }
 .deleteBtn:disabled { opacity: 0.5; cursor: not-allowed; }

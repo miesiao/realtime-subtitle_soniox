@@ -375,6 +375,8 @@ function connect() {
         hideSessionOverlay();
       } else if (msg.status === 'created') {
         showSessionOverlay('尚未開始，請稍候…');
+      } else if (msg.status === 'paused') {
+        showSessionOverlay('主辦單位暫時離線，字幕先暫停，請稍候…');
       } else if (msg.status === 'ended') {
         showSessionOverlay('本場已結束。');
       }

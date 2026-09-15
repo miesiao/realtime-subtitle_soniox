@@ -80,6 +80,10 @@ body { overflow: hidden; }
   text-align: left;
 }
 .overlay-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: var(--space-6); }
+/* The lockup here is an <a href="/"> (design: 各頁 logo 可回首頁) — reset
+   against ds.css's generic accent-colored/underlined `a` so "Subtii" still
+   reads as a wordmark, not a link. */
+.overlay-head .brand-lockup, .overlay-head .brand-lockup:hover { color: inherit; text-decoration: none; }
 .overlay-tag { align-self: flex-start; margin-bottom: var(--space-4); }
 .overlay-card h2 { font-size: 26px; margin: 0; }
 .overlay-sub { font-size: 14px; margin-top: var(--space-2); }

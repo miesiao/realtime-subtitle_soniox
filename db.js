@@ -223,6 +223,24 @@ export async function dbMarkSessionEnded(id) {
   );
 }
 
+// SPEC fix ("場次沒結束一直掛 live"): the server-side auto-pause for a host
+// that disconnected and never reconnected within BILLING_DISCONNECT_GRACE_MS
+// (see server.js's ws.on('close')) — deliberately NOT 'ended': join_code and
+// history survive, and a host coming back just presses Start again (see
+// dbMarkSessionResumed). started_at/ended_at are untouched either way.
+export async function dbMarkSessionPaused(id) {
+  if (!dbReady()) return;
+  await pool.query(`UPDATE sessions SET status = 'paused' WHERE id = $1`, [id]);
+}
+
+// Counterpart to dbMarkSessionPaused: host pressed Start again after an
+// auto-pause. Unlike dbMarkSessionLive, this must NOT touch started_at — the
+// session was already running once, this isn't a fresh start.
+export async function dbMarkSessionResumed(id) {
+  if (!dbReady()) return;
+  await pool.query(`UPDATE sessions SET status = 'live' WHERE id = $1`, [id]);
+}
+
 export async function dbRenameSession(id, name) {
   if (!dbReady()) return false;
   const result = await pool.query(
@@ -332,7 +350,7 @@ export async function dbDeleteSession(id, userId) {
 
 // Zombie-session cleanup, extended to the DB layer (previously
 // sweepStaleSessions in server.js only ever forgot these in-memory, leaving
-// the DB row — and therefore the "字幕間" list — with a dead entry forever).
+// the DB row — and therefore the "字幕場次" list — with a dead entry forever).
 // A session that was created but never started has no transcript_lines/
 // usage_ledger rows yet (both are only ever written after Start), so this is
 // always a safe plain delete with nothing to cascade. Ended sessions are

@@ -35,6 +35,8 @@ import {
   dbSetOrderLastFive,
   dbGetOrder,
   dbInsertUsageLedger,
+  dbMarkSessionPaused,
+  dbMarkSessionResumed,
 } from './db.js';
 import { runTranscriptCleanup } from './transcript-cleanup.js';
 import { sendOrderNotificationEmail, sendOrderCreatedEmail } from './mail.js';
@@ -86,7 +88,13 @@ const TOPUP_TIERS = {
   500: { amountPaid: 500, creditsToAdd: 530 },
   1000: { amountPaid: 1000, creditsToAdd: 1100 },
 };
-const BANK_INFO = '808 玉山銀行 民權分行 / 南隅有限公司 / 0598-940-168796';
+// Three lines on purpose (host.js's #orderBankText renders this with
+// white-space: pre-line) — this is the single source of truth for the
+// transfer account; no HTML in this app hardcodes the account number itself,
+// only the copy-to-clipboard button reads BANK_ACCOUNT_NUMBER directly (see
+// POST /api/orders below) so "複製" copies just the digits, not all 3 lines.
+const BANK_INFO = '南隅有限公司\n(808) 玉山銀行\n0598-940-168796';
+const BANK_ACCOUNT_NUMBER = '0598-940-168796';
 
 // Billing rate (SPEC step 6): 2 credits/min base (pure transcription) + 1
 // credit/min per target language. Only one target language is selectable
@@ -242,11 +250,12 @@ function requireLoginApi(req, res, next) {
   next();
 }
 
-// requireLoginPage: for full-page routes (/host, /sessions) — bounce
-// straight to Google login and back, so a signed-out visitor never sees a
-// half-working page. Only ever redirects to a same-origin relative path
-// (never trusts an absolute/`//`-prefixed returnTo — that would be an open
-// redirect).
+// requireLoginPage: for full-page routes that have no guest use (/sessions —
+// a signed-out visitor owns no sessions to list; /host used to be gated the
+// same way but now allows guests, see its route below) — bounce straight to
+// Google login and back, so a signed-out visitor never sees a half-working
+// page. Only ever redirects to a same-origin relative path (never trusts an
+// absolute/`//`-prefixed returnTo — that would be an open redirect).
 function requireLoginPage(req, res, next) {
   if (!req.isAuthenticated()) {
     const returnTo = encodeURIComponent(req.originalUrl);
@@ -367,6 +376,14 @@ function createSession(userId) {
     billingTimer: null,
     lowBalanceWarned: false,
     disconnectGraceTimer: null,
+    // Set the instant a host WS disconnects while this session is
+    // live/paused; cleared back to null the instant a host WS reconnects
+    // (register handler). Distinct from disconnectGraceTimer's short
+    // BILLING_DISCONNECT_GRACE_MS window (network blip vs. billing) — this is
+    // what the long-TTL sweep below measures "how long has host actually
+    // been gone" against, independent of whether that short grace timer has
+    // fired yet.
+    hostDisconnectedAt: null,
     // null = host hasn't clicked Start yet (unknown); [] = pure transcription
     // (translation off); [lang] = one_way translation to `lang`. Set once at
     // host_start and never changed after — see the host_start handler below.
@@ -399,6 +416,11 @@ function createSession(userId) {
 const SESSION_CLEANUP_INTERVAL_MS = 30 * 60 * 1000;
 const ENDED_SESSION_TTL_MS = 2 * 60 * 60 * 1000;
 const ABANDONED_CREATED_SESSION_TTL_MS = 6 * 60 * 60 * 1000;
+// SPEC fix ("場次沒結束一直掛 live"), part (b): a live/paused session with
+// NO host connection for this long is genuinely abandoned, not just a
+// network blip (BILLING_DISCONNECT_GRACE_MS already handles those in under
+// two minutes) — swept to 'ended' so it can't outlive whoever was running it.
+const LONG_DISCONNECT_TTL_MS = 30 * 60 * 1000;
 
 async function sweepStaleSessions() {
   const now = Date.now();
@@ -409,11 +431,22 @@ async function sweepStaleSessions() {
     if (stale) {
       sessions.delete(id);
       sessionsByJoinCode.delete(session.joinCode);
+      continue;
+    }
+    const abandonedWhileOpen =
+      (session.status === 'live' || session.status === 'paused') &&
+      session.hostDisconnectedAt &&
+      now - session.hostDisconnectedAt > LONG_DISCONNECT_TTL_MS;
+    if (abandonedWhileOpen) {
+      console.log(`[cleanup] session ${id} had no host connection for over 30 minutes — force-ending`);
+      await endSession(session).catch((err) => {
+        console.error(`[cleanup] failed to force-end abandoned session ${id}:`, err);
+      });
     }
   }
   // Extends the above to the DB layer: a never-started session otherwise
   // lives in the `sessions` table forever (and keeps showing up in
-  // "字幕間"'s list as a zombie) even after its in-memory copy is swept.
+  // "字幕場次"'s list as a zombie) even after its in-memory copy is swept.
   // Same TTL as the in-memory branch above, on purpose — one "abandoned"
   // definition, not two independently-tunable ones.
   try {
@@ -562,7 +595,7 @@ app.get('/api/sessions', requireLoginApi, async (req, res) => {
 // Single existing session's share info (SPEC fix: "進入 /host 就自動建場" was
 // creating a zombie `created` row on every page load/refresh — /host now
 // requires ?id=<sessionId> for a session created explicitly via the
-// "＋ 開新場次" button on 字幕間, and loads it here instead of calling POST
+// "＋ 開新場次" button on 字幕場次, and loads it here instead of calling POST
 // /api/sessions again). Ownership-gated like rename/transcript above.
 app.get('/api/sessions/:id', requireLoginApi, async (req, res) => {
   const { id } = req.params;
@@ -598,7 +631,7 @@ app.delete('/api/sessions/:id', requireLoginApi, async (req, res) => {
   const { id } = req.params;
   if (!(await authorizeSessionOwner(req, res, id))) return;
   const liveSession = sessions.get(id);
-  if (liveSession && liveSession.status === 'live') {
+  if (liveSession && (liveSession.status === 'live' || liveSession.status === 'paused')) {
     res.status(409).json({ error: 'session_live' });
     return;
   }
@@ -621,12 +654,46 @@ app.delete('/api/sessions/:id', requireLoginApi, async (req, res) => {
   res.status(200).json({ id, deleted: true });
 });
 
+// Manual safety net (SPEC fix: "場次沒結束一直掛 live") — the 字幕場次 list
+// shows this for any session still displaying as live/paused so a host (or
+// anyone who owns the session) can force it closed even if the tab that was
+// running it is long gone and never sent host_end_session itself. Reuses the
+// exact same endSession() path as that WS message and the long-disconnect
+// sweep below — one "end this session for good" implementation, three
+// triggers. Ownership-gated like the routes above; works whether or not the
+// session still has an in-memory object (a restarted server has none, but
+// the DB row can still be live/paused) — see endSession's own comment.
+app.post('/api/sessions/:id/end', requireLoginApi, async (req, res) => {
+  const { id } = req.params;
+  if (!(await authorizeSessionOwner(req, res, id))) return;
+  const liveSession = sessions.get(id);
+  try {
+    if (liveSession) {
+      await endSession(liveSession); // updates memory + DB + broadcasts + cleanup
+    } else {
+      await dbMarkSessionEnded(id);
+    }
+  } catch (err) {
+    console.error(`[db] failed to end session ${id}:`, err);
+    res.status(500).json({ error: 'Failed to end session' });
+    return;
+  }
+  res.status(200).json({ id, status: 'ended' });
+});
+
 // Tells client-side code who (if anyone) is logged in. Identity is decided
 // here, server-side, from the httpOnly session cookie — never trust anything
 // the client claims about itself.
+// Guest-mode change: a signed-out caller now gets 200 { guest: true } instead
+// of 401 — /host is browsable without login (see the /host route below), and
+// this is what lets its front-end tell "not logged in" apart from "logged-in
+// user with no name/email" without treating every visit as an error to
+// bounce off of. Every endpoint that actually costs something or touches
+// owned data (temporary-key, orders, sessions CRUD) still requires login
+// unchanged — this only affects how /api/me itself reports absence of login.
 app.get('/api/me', (req, res) => {
   if (!req.isAuthenticated()) {
-    res.status(401).json({ error: 'login_required' });
+    res.status(200).json({ guest: true });
     return;
   }
   res.status(200).json({ id: req.user.id, email: req.user.email, name: req.user.name });
@@ -676,6 +743,7 @@ app.post('/api/orders', requireLoginApi, async (req, res) => {
     creditsToAdd: order.credits_to_add,
     status: order.status,
     bankInfo: BANK_INFO,
+    bankAccount: BANK_ACCOUNT_NUMBER,
   });
   // Fire-and-forget, same contract as the last-five notification below — a
   // send failure must never affect the order the response above already
@@ -883,9 +951,16 @@ app.get('/single', (req, res) => serveFile(res, path.join(PUBLIC_DIR, 'index.htm
 // of a bare "login=failed" query string on /host.
 app.get('/login-failed', (req, res) => serveFile(res, path.join(PUBLIC_DIR, 'login-failed.html')));
 
-// Login-gated pages (SPEC §3a points 3/5): a signed-out visitor is bounced
-// to Google and back rather than seeing a page that can't do anything.
-app.get('/host', requireLoginPage, (req, res) => serveFile(res, path.join(PUBLIC_DIR, 'host.html')));
+// /host is now open to guests (SPEC guest-mode): a signed-out visitor can
+// browse the settings panel and top-up plans without logging in first — only
+// pressing Start or actually creating an order requires login (enforced at
+// those specific endpoints below: /api/temporary-key, the WS host_start
+// handler, /api/orders — all unchanged). Passport's session middleware above
+// still runs regardless, so req.user/req.isAuthenticated() are populated
+// exactly as before whenever a login cookie IS present; this route just stops
+// forcing a redirect when it's absent. /sessions has no guest use (a signed-
+// out visitor owns no sessions to list) so it stays fully gated.
+app.get('/host', (req, res) => serveFile(res, path.join(PUBLIC_DIR, 'host.html')));
 app.get('/sessions', requireLoginPage, (req, res) => serveFile(res, path.join(PUBLIC_DIR, 'sessions.html')));
 
 // Viewer flow stays completely open — no login, ever (SPEC §3a "不要碰的").
@@ -972,6 +1047,37 @@ function clearDisconnectGrace(session) {
     clearTimeout(session.disconnectGraceTimer);
     session.disconnectGraceTimer = null;
   }
+}
+
+// Ends a session for good — shared by host_end_session (WS), the manual
+// "結束本場" safety-net endpoint (POST /api/sessions/:id/end), and the
+// long-disconnect sweep (LONG_DISCONNECT_TTL_MS) below. One implementation
+// of "end this session", three triggers. Only the in-memory path can
+// broadcast to viewers or drain pendingInserts — callers with just a DB row
+// (no in-memory session object, e.g. after a server restart) fall back to
+// dbMarkSessionEnded directly instead of calling this.
+async function endSession(session) {
+  clearBillingTimer(session);
+  clearDisconnectGrace(session);
+  if (session.status === 'ended') return;
+  session.status = 'ended';
+  session.endedAt = Date.now();
+  console.log(`[session ${session.id}] ended`);
+  broadcastToViewers(session, { type: 'session_status', status: 'ended', name: session.name });
+  session.viewers.clear();
+  session.hostWs = null;
+
+  // Batch pipeline (SPEC §6.5/§6): fully decoupled from the realtime path
+  // above — draining pendingInserts first closes the race where a line from
+  // the very last utterance is still mid-flight when cleanup reads the
+  // transcript back (see pushUtterance/pendingInserts).
+  await Promise.allSettled(session.pendingInserts);
+  try {
+    await dbMarkSessionEnded(session.id);
+  } catch (err) {
+    console.error(`[db] failed to mark session ${session.id} ended:`, err);
+  }
+  await runTranscriptCleanup(session.id);
 }
 
 // Auto-pause (SPEC step 6, the critical one): stop the meter and tell the
@@ -1079,8 +1185,10 @@ wss.on('connection', (ws) => {
         // A host reconnect (network blip) must not be mistaken for "host
         // walked away" — cancel any pending implicit-stop grace timeout from
         // a previous close (see ws.on('close') below and
-        // BILLING_DISCONNECT_GRACE_MS).
+        // BILLING_DISCONNECT_GRACE_MS), and clear the long-disconnect clock
+        // (LONG_DISCONNECT_TTL_MS / sweepStaleSessions) the same way.
         clearDisconnectGrace(session);
+        session.hostDisconnectedAt = null;
         console.log(`[host] connected session=${session.id}`);
         sendViewerCount(session);
       } else if (msg.role === 'viewer') {
@@ -1149,7 +1257,11 @@ wss.on('connection', (ws) => {
 
       // Host clicked Start (SPEC §4 state machine): created → live, exactly
       // once — a later pause/Start cycle re-sends this while already live, and
-      // must NOT reset startedAt or re-fire dbMarkSessionLive.
+      // must NOT reset startedAt or re-fire dbMarkSessionLive. A session the
+      // server itself auto-paused (SPEC fix "場次沒結束一直掛 live" — see
+      // endSession/hostDisconnectedAt and the 'paused' status below) can also
+      // resume from here: same reused join_code, but startedAt is untouched
+      // since it was never really a fresh session.
       //
       // Settings sync (targetLangs/sourceLangs → session object, DB, and the
       // viewer broadcast below), by contrast, runs on EVERY host_start, first
@@ -1160,10 +1272,15 @@ wss.on('connection', (ws) => {
       // whole block was gated behind the created→live transition, so a
       // mid-session settings change silently never left the host's browser.
       const firstStart = session.status === 'created';
+      const resumingFromPause = session.status === 'paused';
+      session.hostDisconnectedAt = null; // host is clearly back, whatever the long-TTL sweep thought
       if (firstStart) {
         session.status = 'live';
         session.startedAt = Date.now();
         console.log(`[session ${session.id}] live`);
+      } else if (resumingFromPause) {
+        session.status = 'live';
+        console.log(`[session ${session.id}] resumed from paused`);
       }
       // What the host actually chose, for viewers (session_status, read at
       // join time AND on every subsequent broadcast — see targetLangs
@@ -1173,6 +1290,10 @@ wss.on('connection', (ws) => {
       if (firstStart) {
         dbMarkSessionLive(session.id).catch((err) => {
           console.error(`[db] failed to mark session ${session.id} live:`, err);
+        });
+      } else if (resumingFromPause) {
+        dbMarkSessionResumed(session.id).catch((err) => {
+          console.error(`[db] failed to mark session ${session.id} resumed:`, err);
         });
       }
       // sourceLangs is host.js's language_hints selection (['auto'] or a
@@ -1197,35 +1318,17 @@ wss.on('connection', (ws) => {
     }
 
     // Host explicitly ends the session (not the same as Pause/Stop, which
-    // only stops the mic — see host.js). live/created → ended, permanently:
-    // the join_code stops admitting anyone from this point on.
+    // only stops the mic — see host.js). live/created/paused → ended,
+    // permanently: the join_code stops admitting anyone from this point on.
+    // endSession() runs synchronously up to its first await (status flip +
+    // broadcast + clearing viewers/hostWs), so that part still happens
+    // immediately from this handler's point of view — only the DB
+    // update + transcript cleanup tail runs in the background, uncaught
+    // here on purpose (errors are already logged inside endSession itself).
     if (role === 'host' && msg.type === 'host_end_session') {
-      clearBillingTimer(session);
-      clearDisconnectGrace(session);
-      if (session.status !== 'ended') {
-        session.status = 'ended';
-        session.endedAt = Date.now();
-        console.log(`[session ${session.id}] ended`);
-        broadcastToViewers(session, { type: 'session_status', status: 'ended', name: session.name });
-        session.viewers.clear();
-        session.hostWs = null;
-
-        // Batch pipeline (SPEC §6.5/§6): fully decoupled from the realtime
-        // path above — this UPDATE + the Claude cleanup call run in the
-        // background and never block a viewer or the WS handler. Draining
-        // pendingInserts first closes the race where a line from the very
-        // last utterance is still mid-flight when cleanup reads the
-        // transcript back (see pushUtterance/pendingInserts).
-        (async () => {
-          await Promise.allSettled(session.pendingInserts);
-          try {
-            await dbMarkSessionEnded(session.id);
-          } catch (err) {
-            console.error(`[db] failed to mark session ${session.id} ended:`, err);
-          }
-          await runTranscriptCleanup(session.id);
-        })();
-      }
+      endSession(session).catch((err) => {
+        console.error(`[session ${session.id}] endSession failed:`, err);
+      });
       return;
     }
 
@@ -1299,13 +1402,33 @@ wss.on('connection', (ws) => {
       // usually re-register long before this fires. Only treat it as "host
       // actually left" (closed the tab, lost power) after a real grace
       // period with no reconnect — see BILLING_DISCONNECT_GRACE_MS.
-      if (session.billingTimer) {
+      //
+      // SPEC fix ("場次沒結束一直掛 live"): this used to only run — and only
+      // ever stop billing — when session.billingTimer was already set, so a
+      // host who paused (billingTimer null) and then closed the tab left the
+      // session live forever, with no grace timer ever scheduled at all.
+      // Now it always runs for a live/paused session regardless of billing
+      // state, and on timeout also flips the session to 'paused' (not
+      // ended — a network blip or a host who'll be right back shouldn't lose
+      // the join_code) so it stops looking permanently live to viewers and
+      // to the 字幕場次 list. hostDisconnectedAt feeds the separate, much
+      // longer LONG_DISCONNECT_TTL_MS sweep for a session that's truly been
+      // abandoned, not just paused.
+      if (session.status === 'live' || session.status === 'paused') {
+        session.hostDisconnectedAt = Date.now();
         clearDisconnectGrace(session); // just in case one was already pending
         session.disconnectGraceTimer = setTimeout(() => {
           session.disconnectGraceTimer = null;
           if (session.hostWs) return; // reconnected in the meantime after all
-          console.log(`[billing] session ${session.id} host never reconnected — stopping meter`);
           clearBillingTimer(session);
+          if (session.status === 'live') {
+            session.status = 'paused';
+            console.log(`[session ${session.id}] host never reconnected within grace period — auto-paused`);
+            broadcastToViewers(session, { type: 'session_status', status: 'paused', targetLangs: session.targetLangs, name: session.name });
+            dbMarkSessionPaused(session.id).catch((err) => {
+              console.error(`[db] failed to mark session ${session.id} paused:`, err);
+            });
+          }
         }, BILLING_DISCONNECT_GRACE_MS);
       }
     } else if (role === 'viewer') {
