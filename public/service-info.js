@@ -1,0 +1,1 @@
+fetch('/api/service-info').then(r=>r.json()).then(info=>{for(const el of document.querySelectorAll('[data-support],#support')){el.textContent=info.supportEmail;el.href='mailto:'+info.supportEmail;}}).catch(()=>{});

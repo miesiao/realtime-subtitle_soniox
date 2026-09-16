@@ -122,3 +122,79 @@ CREATE TABLE IF NOT EXISTS usage_ledger (
 );
 CREATE INDEX IF NOT EXISTS idx_usage_ledger_session_id ON usage_ledger (session_id);
 CREATE INDEX IF NOT EXISTS idx_usage_ledger_user_id ON usage_ledger (user_id);
+
+-- Reliability rollout, executed once; existing transcripts get a 30-day grace.
+CREATE TABLE IF NOT EXISTS app_migrations (name TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now());
+DO $$ BEGIN
+IF NOT EXISTS (SELECT 1 FROM app_migrations WHERE name = 'mvp-reliability-v1') THEN
+  ALTER TABLE sessions ADD COLUMN next_seq BIGINT NOT NULL DEFAULT 1;
+  ALTER TABLE sessions ADD COLUMN display_after_seq BIGINT NOT NULL DEFAULT 0;
+  ALTER TABLE sessions ADD COLUMN transcript_revision BIGINT NOT NULL DEFAULT 0;
+  ALTER TABLE sessions ADD COLUMN transcript_warning BOOLEAN NOT NULL DEFAULT false;
+  ALTER TABLE sessions ADD COLUMN expires_at TIMESTAMPTZ;
+  ALTER TABLE sessions ADD COLUMN transcript_expired_at TIMESTAMPTZ;
+  UPDATE sessions SET expires_at = now() + interval '30 days' WHERE status = 'ended';
+  -- Legacy Clear restarted seq. Normalize old rows before enforcing uniqueness.
+  WITH numbered AS (SELECT id, row_number() OVER (PARTITION BY session_id ORDER BY id) AS n FROM transcript_lines)
+    UPDATE transcript_lines SET seq = numbered.n FROM numbered WHERE transcript_lines.id = numbered.id;
+  UPDATE sessions s SET next_seq = COALESCE((SELECT max(seq) + 1 FROM transcript_lines WHERE session_id = s.id), 1);
+  ALTER TABLE transcript_lines ADD COLUMN client_message_id TEXT;
+  ALTER TABLE transcript_lines ADD COLUMN translations JSONB NOT NULL DEFAULT '{}'::jsonb;
+  CREATE UNIQUE INDEX transcript_message_unique ON transcript_lines(session_id, client_message_id);
+  CREATE UNIQUE INDEX transcript_seq_unique ON transcript_lines(session_id, seq);
+  ALTER TABLE usage_ledger ADD COLUMN source_session_id UUID;
+  UPDATE usage_ledger SET source_session_id = session_id;
+  ALTER TABLE usage_ledger ALTER COLUMN source_session_id SET NOT NULL;
+  ALTER TABLE usage_ledger ADD COLUMN debit_id TEXT UNIQUE;
+  ALTER TABLE usage_ledger ALTER COLUMN session_id DROP NOT NULL;
+  ALTER TABLE usage_ledger DROP CONSTRAINT usage_ledger_session_id_fkey;
+  ALTER TABLE usage_ledger ADD CONSTRAINT usage_ledger_session_id_fkey FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE SET NULL;
+  INSERT INTO app_migrations(name) VALUES ('mvp-reliability-v1');
+END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS audio_meters (
+  session_id UUID REFERENCES sessions(id) ON DELETE CASCADE,
+  rate INTEGER NOT NULL CHECK (rate IN (2,3)),
+  processed_ms DOUBLE PRECISION NOT NULL DEFAULT 0 CHECK (processed_ms >= 0),
+  paid_minutes INTEGER NOT NULL DEFAULT 0 CHECK (paid_minutes >= 0),
+  PRIMARY KEY(session_id, rate)
+);
+CREATE TABLE IF NOT EXISTS account_opening_balances (
+  user_id UUID PRIMARY KEY REFERENCES users(id),
+  credits INTEGER NOT NULL,
+  captured_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+INSERT INTO account_opening_balances(user_id, credits) SELECT id, credits FROM users ON CONFLICT DO NOTHING;
+CREATE TABLE IF NOT EXISTS credit_ledger (
+  entry_id TEXT PRIMARY KEY,
+  user_id UUID NOT NULL REFERENCES users(id),
+  kind TEXT NOT NULL CHECK (kind IN ('topup','adjustment')),
+  credits_delta INTEGER NOT NULL,
+  balance_after INTEGER NOT NULL,
+  order_id TEXT UNIQUE REFERENCES orders(id),
+  transfer_reference TEXT UNIQUE,
+  operator TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS cleanup_jobs (
+  session_id UUID PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'queued',
+  source_revision BIGINT,
+  source_hash TEXT,
+  job_token UUID,
+  lease_until TIMESTAMPTZ,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS cleanup_chunks (
+  session_id UUID NOT NULL REFERENCES cleanup_jobs(session_id) ON DELETE CASCADE,
+  source_hash TEXT NOT NULL,
+  chunk_index INTEGER NOT NULL,
+  start_seq BIGINT NOT NULL,
+  end_seq BIGINT NOT NULL,
+  input_text TEXT NOT NULL,
+  output_text TEXT,
+  PRIMARY KEY(session_id, source_hash, chunk_index)
+);
+CREATE INDEX IF NOT EXISTS sessions_expiry ON sessions(expires_at) WHERE transcript_expired_at IS NULL;

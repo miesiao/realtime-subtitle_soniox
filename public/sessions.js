@@ -41,7 +41,7 @@ const STATUS_LABELS = { created: '尚未開播', live: '直播中', paused: '暫
 // only limits what gets rendered into the DOM up front; expanding swaps in
 // the same in-memory text rather than firing a second fetch.
 const TRANSCRIPT_PREVIEW_LINES = 5;
-const PROCESSING_LABELS = { idle: '', processing: '整理中…', ready: '逐字稿已就緒', failed: '整理失敗' };
+const PROCESSING_LABELS = { queued:'等待整理', incomplete:'整理不完整', expired:'逐字稿已到期刪除', idle: '', processing: '整理中…', ready: '逐字稿已就緒', failed: '整理失敗' };
 
 function formatDate(iso) {
   if (!iso) return '';
@@ -50,6 +50,7 @@ function formatDate(iso) {
 }
 
 function renderSessionRow(session) {
+  if(session.transcriptExpired)session.processingStatus='expired';
   const node = rowTemplate.content.cloneNode(true);
   const row = node.querySelector('.session-row');
   const nameInput = node.querySelector('.session-name-input');
@@ -73,7 +74,9 @@ function renderSessionRow(session) {
   statusBadge.dataset.status = session.status;
   processingBadge.textContent = PROCESSING_LABELS[session.processingStatus] || '';
   processingBadge.dataset.processing = session.processingStatus || '';
-  createdAtEl.textContent = formatDate(session.createdAt);
+  createdAtEl.textContent = formatDate(session.createdAt)+(session.expiresAt?' · 逐字稿保存至 '+formatDate(session.expiresAt):'');
+  if(session.transcriptWarning){const warning=document.createElement('p');warning.textContent='逐字稿可能不完整，請下載原始稿核對。';row.append(warning);}
+  const raw=document.createElement('a');raw.textContent='下載原始逐字稿';raw.href='/api/sessions/'+session.id+'/transcript/raw';raw.hidden=!!session.transcriptExpired;transcriptSection.append(raw);
 
   renameBtn.addEventListener('click', async () => {
     const name = nameInput.value.trim();
@@ -139,7 +142,7 @@ function renderSessionRow(session) {
     transcriptSection.hidden = false;
     if (session.processingStatus === 'ready') {
       loadTranscript();
-    } else if (session.processingStatus === 'failed') {
+    } else if (['failed','incomplete'].includes(session.processingStatus)) {
       retryBtn.hidden = false;
       retryBtn.addEventListener('click', async () => {
         retryBtn.disabled = true;

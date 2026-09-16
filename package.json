@@ -4,7 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --experimental-test-module-mocks --test tests/*.test.js",
+    "test:browser": "node --experimental-test-module-mocks tests/browser-smoke.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.124.0",
@@ -21,5 +23,8 @@
     "pg": "^8.23.0",
     "qrcode": "^1.5.4",
     "ws": "^8.21.3"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.8"
   }
 }

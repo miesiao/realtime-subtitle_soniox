@@ -1,0 +1,11 @@
+import {test,mock} from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+const exports=Object.fromEntries([...fs.readFileSync(new URL('../db.js',import.meta.url),'utf8').matchAll(/export async function (\w+)/g)].map(x=>[x[1],async()=>null]));
+let saved=[],finished=[],valid=true;
+Object.assign(exports,{dbRenewCleanupJob:async()=>valid,dbPrepareCleanupChunks:async(id,token,hash,chunks)=>chunks.map((x,i)=>({...x,input_text:x.text,chunk_index:i,output_text:i===0?'cached':null})),dbSaveCleanupChunk:async(...args)=>{saved.push(args);return valid;},dbFinishCleanupJob:async(...args)=>finished.push(args)});
+mock.module(new URL('../db.js',import.meta.url).href,{namedExports:exports});
+const {splitTranscript,cleanedResponse,processCleanupJob}=await import('../transcript-cleanup.js');
+test('token-bounded Unicode splitting preserves every character including tail',async()=>{const text='測試😀'.repeat(3000)+'最後一句';const chunks=await splitTranscript([{seq:9,original_text:text}],async s=>Array.from(s).length);assert.equal(chunks.map(x=>x.text).join(''),text);assert.ok(chunks.every(x=>Array.from(x.text).length<=2000&&x.startSeq===9&&x.endSeq===9));});
+test('truncated or empty responses cannot become ready',()=>{for(const response of [{stop_reason:'max_tokens',content:[{type:'text',text:'partial'}]},{stop_reason:'end_turn',content:[]}])assert.throws(()=>cleanedResponse(response),/incomplete_output/);assert.equal(cleanedResponse({stop_reason:'end_turn',content:[{type:'text',text:'完整'}]}),'完整');});
+test('retry reuses completed chunks; a superseded worker does not publish',async()=>{let calls=0;const api={messages:{countTokens:async()=>({input_tokens:100}),create:async()=>{calls++;return {stop_reason:'end_turn',content:[{type:'text',text:'tail'}]};}}};const job={sessionId:'room',token:'token',lines:[{seq:1,original_text:'字'.repeat(4000)},{seq:2,original_text:'tail'}]};await processCleanupJob(job,api);assert.equal(calls,1);assert.equal(saved.length,1);assert.equal(finished.length,1);valid=false;await assert.rejects(processCleanupJob(job,api),/job_superseded/);assert.equal(finished.length,1);});

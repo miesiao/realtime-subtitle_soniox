@@ -1,29 +1,10 @@
+import { TranscriptOutbox } from '/transcript-outbox.js';
 import { SonioxClient } from '/vendor/soniox-client.mjs';
 import * as OpenCC from '/vendor/opencc-cn2t.mjs';
 import { COMMON_LANGUAGES, MORE_LANGUAGES, DEFAULT_SOURCE_LANG_CODES } from '/languages.js';
 
-// --- Host password gate (protects the one endpoint that costs money) ------
-// Not a real account system — just a shared password kept in localStorage.
-// Asked immediately on page load (not lazily on first recording) so a host
-// can't get halfway into the UI before hitting the gate.
-const HOST_SECRET_STORAGE_KEY = 'hostSecret';
-
-function getStoredHostSecret() {
-  return localStorage.getItem(HOST_SECRET_STORAGE_KEY);
-}
-
-function promptForHostSecret() {
-  const secret = window.prompt('請輸入密碼：') || '';
-  localStorage.setItem(HOST_SECRET_STORAGE_KEY, secret);
-  return secret;
-}
-
-function clearStoredHostSecret() {
-  localStorage.removeItem(HOST_SECRET_STORAGE_KEY);
-}
-
-let hostSecret = getStoredHostSecret();
-if (!hostSecret) hostSecret = promptForHostSecret();
+// Google login is the only host identity. Remove the obsolete shared secret.
+localStorage.removeItem('hostSecret');
 
 // Soniox's language codes only have generic "zh" — no zh-Hant/zh-Hans, and
 // there is no API parameter to force Traditional output. In practice the
@@ -145,7 +126,7 @@ const orderStatusTextEl = document.getElementById('orderStatusText');
 // Start and "確認，建立訂單" ever send a guest to login, and only when
 // they're actually pressed (see their handlers below).
 function redirectToLogin() {
-  location.href = `/auth/google?returnTo=${encodeURIComponent(location.pathname)}`;
+  location.href = `/auth/google?returnTo=${encodeURIComponent(sessionId ? location.pathname + location.search : '/sessions')}`;
 }
 
 async function apiFetchJson(url, options = {}) {
@@ -164,7 +145,7 @@ async function apiFetchJson(url, options = {}) {
 // Set once loadWhoAmI resolves; read by Start / confirmCreateOrderBtn (both
 // redirect to login immediately instead of ever hitting a 401) and by the
 // credits chip / whoAmI display below.
-let isGuest = false;
+let isGuest = true;
 // Cosmetic only ("訪客" + a random tag, SPEC: "顯示「訪客」加一組隨機代號") —
 // stable for the life of this tab/reload via sessionStorage, so it doesn't
 // change every time loadWhoAmI happens to re-run.
@@ -178,17 +159,7 @@ function getOrCreateGuestTag() {
   return tag;
 }
 
-// Deliberately fire-and-forget (not top-level awaited) — same as before this
-// change — so it never delays wiring up every other button handler below.
-// isGuest is a `let` in this module's scope, so every closure that reads it
-// (Start, confirmCreateOrderBtn, hostLogoLink...) always sees its current
-// value at the moment of the actual click/interaction, which — human
-// reaction time being what it is — is always well after this same-origin
-// fetch has resolved. refreshCredits() is deliberately called from inside
-// here rather than as its own unconditional top-level statement (see below):
-// that statement would otherwise run before this async function's first
-// await resolves, while isGuest is still its default `false`, and fire an
-// unwanted /api/credits call — and 401 redirect — for an actual guest.
+// Resolve identity before initializing the host session and wiring Start.
 async function loadWhoAmI() {
   try {
     const me = await apiFetchJson('/api/me');
@@ -200,6 +171,7 @@ async function loadWhoAmI() {
       creditsChipEl.hidden = true;
       creditsChipGuestEl.hidden = false;
     } else {
+      isGuest = false;
       whoAmIEl.textContent = `登入身分：${me.name || me.email || me.id}`;
       refreshCredits();
     }
@@ -207,11 +179,11 @@ async function loadWhoAmI() {
     if (err.message !== 'login_required') whoAmIEl.textContent = `無法確認登入狀態：${err.message}`;
   }
 }
-loadWhoAmI();
+const loginReady = loadWhoAmI();
 
 // --- Credits / top-up (SPEC steps 3/6) --------------------------------------
 // currentCredits is a display cache only — every enforcement decision is
-// made server-side (POST /api/temporary-key, the WS host_start handler);
+// made server-side by the authenticated audio relay;
 // this value is never trusted for anything except what number to show and
 // whether to bother the user with a client-side "you probably can't afford
 // this" heads-up before they even try Start.
@@ -237,8 +209,7 @@ async function refreshCredits() {
 // apiFetchJson's 401-redirect-to-login just from loading the page.
 
 // Same formula as server.js's creditsPerMinuteFor — kept in sync by hand
-// since this is only ever a pre-flight courtesy check; /api/temporary-key
-// and the WS host_start handler are the actual source of truth for cost.
+// for display only; provider-confirmed usage is the source of truth for cost.
 function currentRequiredCreditsPerMinute() {
   return 2 + (translateEnabledEl.checked ? 1 : 0);
 }
@@ -310,7 +281,7 @@ confirmCreateOrderBtn.addEventListener('click', async () => {
   // is purely so a guest gets sent straight to login instead of a confusing
   // "建立訂單失敗" message first.
   if (isGuest) {
-    location.href = `/auth/google?returnTo=${encodeURIComponent(location.pathname)}`;
+    location.href = `/auth/google?returnTo=${encodeURIComponent(sessionId ? location.pathname + location.search : '/sessions')}`;
     return;
   }
   confirmCreateOrderBtn.disabled = true;
@@ -505,6 +476,7 @@ const hostDisconnectBannerEl = document.getElementById('hostDisconnectBanner');
 const WS_RECONNECT_BASE_MS = 1000;
 const WS_RECONNECT_MAX_MS = 10000;
 let ws = null;
+let hostRegistered = false;
 let wsReconnectTimer = null;
 let wsReconnectAttempt = 0;
 
@@ -528,12 +500,19 @@ function connectWs() {
   ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`);
 
   ws.addEventListener('open', () => {
+    hostRegistered = false;
     wsReconnectAttempt = 0;
     wsStatusEl.textContent = 'ws: connected';
     hideHostDisconnectBanner();
     ws.send(JSON.stringify({ type: 'register', role: 'host', sessionId: currentSession.id }));
   });
   ws.addEventListener('close', () => {
+    hostRegistered = false;
+    if (userWantsRecording) {
+      pauseRecording().then(() => {
+        statusEl.textContent = '連線中斷，已暫停收音；重新連上後請按 Start 繼續。';
+      });
+    }
     wsStatusEl.textContent = 'ws: disconnected';
     showHostDisconnectBanner();
     wsReconnectTimer = setTimeout(connectWs, nextWsReconnectDelay());
@@ -543,10 +522,26 @@ function connectWs() {
   });
   ws.addEventListener('message', (event) => {
     const msg = JSON.parse(event.data);
-    if (msg.type === 'viewer_count') {
+    if (msg.type === 'host_registered') {
+      hostRegistered = true;
+      if(msg.transcriptWarning)transcriptWarning();
+      outbox?.pump();
+    } else if (msg.type === 'utterance_ack' || msg.type === 'utterance_rejected') {
+      outbox?.ack(msg.clientMessageId,msg.type==='utterance_rejected').then(()=>outbox.pump());
+    } else if (msg.type === 'gap_ack') { outbox?.gapAck();
+    } else if (msg.type === 'transcript_warning') { transcriptWarning();
+    } else if (msg.type === 'recording_started') {
+      sessionIsLive = true;
+      sonioxRetryCount = 0;
+      statusEl.textContent = 'recording';
+    } else if (msg.type === 'viewer_count') {
       viewerCountEl.textContent = `viewers: ${msg.count}`;
     } else if (msg.type === 'register_error') {
-      wsStatusEl.textContent = `ws: register failed (${msg.reason})`;
+      hostRegistered = false;
+      clearTimeout(wsReconnectTimer);
+      wsStatusEl.textContent = `無法加入場次（${msg.reason}），請回字幕場次清單重新進入。`;
+      sessionErrorTextEl.textContent = wsStatusEl.textContent;
+      sessionErrorEl.hidden = false;
     } else if (msg.type === 'credits_update') {
       currentCredits = msg.credits;
       renderCredits();
@@ -572,6 +567,10 @@ function connectWs() {
 // internal id only ever travels over this authenticated fetch response and
 // this page's own WS registration; it never gets embedded in the QR/viewer
 // link (that's `joinCode`, the capability-based ticket — see §3).
+let outbox;
+function transcriptWarning(message='逐字稿可能不完整，請下載原始稿核對。') {
+ let el=document.getElementById('transcriptWarning');if(!el){el=document.createElement('p');el.id='transcriptWarning';el.setAttribute('role','alert');statusEl.after(el);}el.textContent=message;
+}
 let currentSession = null; // { id, joinCode, viewerUrl, qrDataUrl }
 
 // /host now operates on ONE EXISTING session, created explicitly by the
@@ -626,12 +625,15 @@ renameBtn.addEventListener('click', async () => {
 // 'ready' or 'failed'.
 let transcriptPollTimer = null;
 const TRANSCRIPT_POLL_MS = 3000;
-const TRANSCRIPT_STATUS_LABELS = { processing: '整理中…', ready: '完成，可下載', failed: '整理失敗' };
+const TRANSCRIPT_STATUS_LABELS = { queued:'等待整理…', incomplete:'整理結果不完整，請重試或下載原始稿', expired:'逐字稿已到期刪除', processing: '整理中…', ready: '完成，可下載', failed: '整理失敗' };
 
 function renderTranscriptStatus(data) {
+  if(data.transcriptExpired)data.processingStatus='expired';
   transcriptSectionEl.hidden = false;
-  transcriptStatusEl.textContent = TRANSCRIPT_STATUS_LABELS[data.processingStatus] || '準備中…';
-  retryTranscriptBtn.hidden = data.processingStatus !== 'failed';
+  let raw=document.getElementById('rawTranscript');if(!raw){raw=document.createElement('a');raw.id='rawTranscript';raw.textContent='下載原始逐字稿';transcriptSectionEl.append(raw);}raw.href='/api/sessions/'+currentSession.id+'/transcript/raw';raw.hidden=!!data.transcriptExpired;
+  if(data.transcriptWarning)transcriptWarning();
+  transcriptStatusEl.textContent = (TRANSCRIPT_STATUS_LABELS[data.processingStatus] || '準備中…')+(data.expiresAt&&!data.transcriptExpired?' · 保存至 '+new Date(data.expiresAt).toLocaleDateString():'');
+  retryTranscriptBtn.hidden = !['failed','incomplete'].includes(data.processingStatus);
   if (data.processingStatus === 'ready' && data.cleanedTranscript) {
     transcriptTextEl.textContent = data.cleanedTranscript;
     downloadTranscriptBtn.hidden = false;
@@ -655,7 +657,7 @@ async function pollTranscriptStatus() {
   try {
     const data = await apiFetchJson(`/api/sessions/${currentSession.id}/transcript`);
     renderTranscriptStatus(data);
-    if (data.processingStatus !== 'ready' && data.processingStatus !== 'failed') {
+    if (!['ready','failed','incomplete','expired'].includes(data.processingStatus)) {
       transcriptPollTimer = setTimeout(pollTranscriptStatus, TRANSCRIPT_POLL_MS);
     }
   } catch (err) {
@@ -715,6 +717,8 @@ async function initSession() {
   try {
     currentSession = await loadSession(sessionId);
     renderSession(currentSession);
+    if(!outbox) outbox=await new TranscriptOutbox(currentSession.id, message=>{if(hostRegistered && ws?.readyState===WebSocket.OPEN)ws.send(JSON.stringify(message));},transcriptWarning).open();
+    if(currentSession.status==='ended'){startBtn.disabled=true;endSessionBtn.disabled=true;startTranscriptPolling();}
     // 'paused' (server auto-paused after a lost host connection — see
     // server.js's endSession/dbMarkSessionPaused) still counts as "in
     // progress" for the logo-click confirm below: the join_code and viewer
@@ -732,6 +736,7 @@ async function initSession() {
 }
 retrySessionBtn.addEventListener('click', () => { initSession(); });
 
+await loginReady;
 await initSession();
 
 function logSent(original, translations) {
@@ -753,48 +758,23 @@ function sendUtterance(original, translation) {
   const translations = translateEnabledEl.checked
     ? { [targetLangSelect.value]: (translation.trim() || trimmedOriginal) }
     : {};
-  if (ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type: 'host_utterance', original: trimmedOriginal, translations }));
-  }
+  outbox?.add(trimmedOriginal, translations);
   logSent(trimmedOriginal, translations);
 }
 
-function requestTemporaryKey(secret) {
-  // targetLangCount travels with this request so the server can check
-  // credits against the SAME rate host_start/the billing timer will use
-  // (SPEC step 6) — see currentRequiredCreditsPerMinute's comment.
-  return fetch('/api/temporary-key', {
-    method: 'POST',
-    credentials: 'same-origin',
-    headers: { 'x-host-secret': secret, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ targetLangCount: translateEnabledEl.checked ? 1 : 0 }),
-  });
-}
-
-async function fetchTemporaryKey() {
-  let res = await requestTemporaryKey(hostSecret);
-  if (res.status === 401) {
-    clearStoredHostSecret();
-    alert('密碼錯誤，請重新輸入');
-    hostSecret = promptForHostSecret();
-    res = await requestTemporaryKey(hostSecret);
-  }
-  if (res.status === 402) {
-    const body = await res.json().catch(() => ({}));
-    const err = new Error(`點數不足，請先儲值（目前 ${body.credits ?? 0} 點，開播需要 ${body.required ?? '?'} 點/分鐘）`);
-    err.code = 'insufficient_credits';
-    throw err;
-  }
-  if (!res.ok) throw new Error('Failed to fetch temporary key from server');
-  const { api_key } = await res.json();
-  return api_key;
-}
-
-// --- Soniox client (temporary key fetched fresh per recording session) --
+// The SDK obtains microphone permission before resolving this config.
+// This placeholder is not a provider credential; Google session cookies
+// authenticate the same-origin relay.
 const client = new SonioxClient({
   config: async () => {
-    const api_key = await fetchTemporaryKey();
-    return { api_key };
+    if (!currentSession || !hostRegistered || ws?.readyState !== WebSocket.OPEN) {
+      throw new Error('場次尚未連線，請稍後再按 Start');
+    }
+    return {
+      api_key: 'server-managed',
+      stt_ws_url: (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host +
+        '/audio?sessionId=' + encodeURIComponent(currentSession.id),
+    };
   },
 });
 
@@ -852,7 +832,7 @@ function sendInterimSnapshot() {
   const translations = translateEnabledEl.checked
     ? { [targetLangSelect.value]: (currentInterimTranslation().trim() || original) }
     : {};
-  if (ws.readyState === WebSocket.OPEN) {
+  if (ws?.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: 'host_interim', original, translations }));
   }
 }
@@ -1069,7 +1049,7 @@ function parseTerms(raw) {
 // `.code` (see @soniox/client's audio/errors.ts: AudioPermissionError,
 // AudioDeviceError, AudioUnavailableError) — translate those into something
 // a non-technical host can act on, instead of the bare string "error".
-// insufficient_credits (SPEC step 6) comes from fetchTemporaryKey above, not
+// insufficient_credits (SPEC step 6) comes from the server audio relay, not
 // the SDK — same non-retriable treatment as a real device/permission error:
 // retrying against an empty wallet can't ever succeed on its own.
 const NON_RETRIABLE_ERROR_CODES = new Set(['permission_denied', 'device_not_found', 'audio_unavailable', 'insufficient_credits']);
@@ -1130,6 +1110,7 @@ function maybeAutoReconnectSoniox() {
 }
 
 function startRecording() {
+  clearTimeout(sonioxRetryTimer);
   originalStream = makeStream();
   translationStream = makeStream();
   pairOriginal = [];
@@ -1143,6 +1124,7 @@ function startRecording() {
   const terms = parseTerms(termsInput.value);
   const config = {
     model: 'stt-rt-v5',
+    auto_reconnect: false,
     enable_language_identification: true,
     enable_endpoint_detection: true,
   };
@@ -1162,13 +1144,11 @@ function startRecording() {
   if (terms.length) config.context = { terms };
 
   // The client's config callback (see `new SonioxClient` above) fetches a
-  // fresh temporary key on every call to .record(), so an auto-retry here
-  // naturally avoids reusing a stale/expired key.
+  // authenticated relay connection on every call to .record().
   recording = client.realtime.record(config);
 
   recording.on('connected', () => {
-    statusEl.textContent = 'recording';
-    sonioxRetryCount = 0; // this attempt actually succeeded — reset the budget
+    statusEl.textContent = '已接通，等待語音服務確認收音…';
   });
   recording.on('result', handleResult);
   recording.on('endpoint', handleEndpoint);
@@ -1189,6 +1169,7 @@ function startRecording() {
       setUiRecording(false);
       statusEl.textContent = new_state;
     } else if (new_state === 'error') {
+      flushPair();
       setUiRecording(false);
       statusEl.textContent = lastRecordingErrorMessage || 'error: 連線發生未知錯誤';
       lastRecordingErrorMessage = null;
@@ -1197,54 +1178,18 @@ function startRecording() {
   });
 }
 
-startBtn.addEventListener('click', async () => {
-  // Guest-mode (SPEC): Start always goes straight to login for a guest,
-  // never attempts to open a Soniox recording session first — checked before
-  // any other validation below, so a guest never sees a mic-permission
-  // prompt or any other Start side effect before being sent to log in.
-  if (isGuest) {
-    location.href = `/auth/google?returnTo=${encodeURIComponent(location.pathname)}`;
+startBtn.addEventListener('click', () => {
+  if (isGuest) { redirectToLogin(); return; }
+  if (!currentSession) { location.href = '/sessions'; return; }
+  if (!hostRegistered || ws?.readyState !== WebSocket.OPEN) {
+    statusEl.textContent = '場次尚未連線，請等待重新連線後再按 Start。';
     return;
   }
-  // Boundary case (SPEC point 3): block Start rather than silently falling
-  // back to "no hints" if nothing is checked and auto-detect isn't chosen.
-  const sourceSelection = currentSourceLangSelection();
-  if (!validateSourceLangSelection(sourceSelection)) return;
-
-  // Pre-flight credit check (SPEC step 6 "開場預檢") — purely a courtesy so
-  // a 0-point (or too-low) host gets an immediate, clear message instead of
-  // a confusing Soniox connection failure a moment later. This is NOT the
-  // enforcement point: /api/temporary-key and the WS host_start handler
-  // check the same thing server-side and are what actually can't be
-  // bypassed, so a stale currentCredits here can only over-block, never
-  // let an unaffordable session through.
-  await refreshCredits();
-  const requiredCredits = currentRequiredCreditsPerMinute();
-  if (currentCredits === null || currentCredits < requiredCredits) {
-    alert(`點數不足，請先儲值再開播（目前 ${currentCredits ?? 0} 點，開播需要至少 ${requiredCredits} 點/分鐘）`);
-    return;
-  }
+  if (!validateSourceLangSelection(currentSourceLangSelection())) return;
   creditsPausedBannerEl.hidden = true;
-
-  sonioxRetryCount = 0; // manual Start always gets a fresh retry budget
+  sonioxRetryCount = 0;
   userWantsRecording = true;
-  // First Start flips the session created → live (SPEC §4); a later
-  // pause/Start cycle re-sends this but the server treats it as a no-op.
-  // translateEnabled/targetLanguage/sourceLangs are only for the session's DB
-  // record (SPEC §6.5 "如實記錄") — they don't affect Soniox itself, which is
-  // config'd separately in startRecording() below from the same controls.
-  // The server independently re-derives and re-checks the credit rate from
-  // these same fields before actually starting its billing timer (SPEC step
-  // 6) — see server.js's host_start handler.
-  sessionIsLive = true; // this session is now "in progress" — see hostLogoLink below
-  if (ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({
-      type: 'host_start',
-      translateEnabled: translateEnabledEl.checked,
-      targetLanguage: targetLangSelect.value,
-      sourceLangs: sourceSelection.autoDetect ? ['auto'] : sourceSelection.codes,
-    }));
-  }
+  // Only provider-confirmed audio can mark a session live or charge it.
   startRecording();
 });
 
@@ -1255,12 +1200,11 @@ startBtn.addEventListener('click', async () => {
 // step 6's auto-pause) — from this function's point of view the two are
 // identical, only who triggered it differs.
 async function pauseRecording() {
-  if (!recording) return;
   userWantsRecording = false; // must be set before recording.stop() — see comment above
   clearTimeout(sonioxRetryTimer);
   statusEl.textContent = 'stopping…';
   try {
-    await recording.stop();
+    if (recording) await recording.stop();
   } catch (err) {
     console.error('Stop failed:', err);
   }
@@ -1268,11 +1212,8 @@ async function pauseRecording() {
   flushPair();
   setUiRecording(false);
   statusEl.textContent = 'idle';
-  // Billing (SPEC step 6): stop the server's per-minute meter — mirrors
-  // host_start's role in starting it. Sent unconditionally; if the server
-  // already stopped it on its own (this pause WAS the force_pause), it's a
-  // harmless no-op there.
-  if (ws.readyState === WebSocket.OPEN) {
+  // Close any remaining relay after the SDK has delivered final results.
+  if (ws?.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: 'host_stop' }));
   }
 }
@@ -1282,7 +1223,7 @@ stopBtn.addEventListener('click', () => {
 });
 
 clearBtn.addEventListener('click', () => {
-  if (ws.readyState === WebSocket.OPEN) {
+  if (ws?.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: 'host_clear' }));
   }
 });
@@ -1291,18 +1232,17 @@ clearBtn.addEventListener('click', () => {
 // stopBtn's pause. The join_code stops admitting viewers the moment this
 // lands; starting a new session means reloading this page (§0: "用完即拋").
 endSessionBtn.addEventListener('click', async () => {
-  if (!confirm('確定要結束本場嗎？結束後這個場次代碼就不能再進場了。')) return;
-  await pauseRecording(); // no-op if nothing was recording — see its own guard
-  if (ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type: 'host_end_session' }));
-  }
-  sessionIsLive = false; // already confirmed above — logo click needs no second confirm now
-  startBtn.disabled = true;
-  stopBtn.disabled = true;
-  clearBtn.disabled = true;
-  endSessionBtn.disabled = true;
-  statusEl.textContent = 'session ended';
-  startTranscriptPolling();
+  if (!confirm('確定要結束本場嗎？')) return;
+  endSessionBtn.disabled=true;
+  try {
+    await pauseRecording();
+    const complete=await outbox?.drain();
+    if(!complete&&!confirm('仍有字幕未送達。建議恢復連線後再結束；仍要結束並標示逐字稿可能不完整嗎？'))return;
+    await apiFetchJson('/api/sessions/'+currentSession.id+'/end',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({transcriptIncomplete:!complete})});
+    currentSession.status='ended';sessionIsLive=false;startBtn.disabled=true;stopBtn.disabled=true;clearBtn.disabled=true;
+    statusEl.textContent='本場已結束';startTranscriptPolling();
+  }catch(error){statusEl.textContent='結束失敗，請重試：'+error.message;}
+  finally{endSessionBtn.disabled=currentSession.status==='ended';}
 });
 
 // Logo → home (design: 各頁 logo 可回首頁). host's one rule: while the

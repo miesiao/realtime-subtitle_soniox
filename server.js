@@ -3,14 +3,15 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import express from 'express';
 import session from 'express-session';
 import connectPgSimple from 'connect-pg-simple';
 import passport from 'passport';
 import { Strategy as GoogleStrategy } from 'passport-google-oauth20';
 import { WebSocketServer, WebSocket } from 'ws';
-import { SonioxNodeClient } from '@soniox/node';
+import { attachAudioRelay } from './audio-relay.js';
+import { LANGUAGES } from './public/languages.js';
 import QRCode from 'qrcode';
 import {
   pool,
@@ -30,15 +31,16 @@ import {
   dbDeleteSession,
   dbDeleteAbandonedCreatedSessions,
   dbGetUserCredits,
-  dbChargeCredits,
+  dbChargeSessionMinute,
   dbCreateOrder,
   dbSetOrderLastFive,
   dbGetOrder,
-  dbInsertUsageLedger,
   dbMarkSessionPaused,
   dbMarkSessionResumed,
+  dbRecoverSessions, dbGetRecentTranscript, dbCommitTranscript, dbMarkTranscriptWarning,
+  dbGetRawTranscript, dbExpireTranscripts, dbSetHistoryBoundary, dbGetAudioMeter, dbSaveAudioMeter, dbGetBillingHistory,
 } from './db.js';
-import { runTranscriptCleanup } from './transcript-cleanup.js';
+import { runTranscriptCleanup, startCleanupWorker } from './transcript-cleanup.js';
 import { sendOrderNotificationEmail, sendOrderCreatedEmail } from './mail.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -49,8 +51,7 @@ if (!process.env.SONIOX_API_KEY) {
   process.exit(1);
 }
 
-// Reads SONIOX_API_KEY from the environment. This key never leaves the server.
-const soniox = new SonioxNodeClient();
+// Soniox credentials stay in the server-side audio relay.
 
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const VENDOR_CLIENT_SDK = path.join(__dirname, 'node_modules', '@soniox', 'client', 'dist', 'index.mjs');
@@ -62,21 +63,6 @@ const MIME_TYPES = {
   '.mjs': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
 };
-
-// Guards the one endpoint that actually costs money (Soniox temporary key
-// issuance). Session creation/rename/transcript moved to login-based
-// ownership in phase 3a (see requireLoginApi/requireLoginPage below) — this
-// shared-secret gate is kept only for /api/temporary-key, deliberately not
-// torn out yet (SPEC §3a point 4: "避免 auth 真空", pull it only when told
-// to). Fixed-time comparison so a wrong guess can't be narrowed down by
-// measuring how long the check took.
-function isValidHostSecret(provided) {
-  const expected = process.env.HOST_SECRET;
-  const expectedBuf = Buffer.from(expected);
-  const providedBuf = Buffer.from(typeof provided === 'string' ? provided : '');
-  if (expectedBuf.length !== providedBuf.length) return false;
-  return crypto.timingSafeEqual(expectedBuf, providedBuf);
-}
 
 // ---------------------------------------------------------------------------
 // Paid credit system (SPEC steps 3/6). Amount→credits mapping is fixed here,
@@ -104,34 +90,8 @@ const BASE_CREDITS_PER_MINUTE = 2;
 function creditsPerMinuteFor(targetLangCount) {
   return BASE_CREDITS_PER_MINUTE + targetLangCount;
 }
-const BILLING_TICK_MS = 60 * 1000;
-// "剩約 10 分鐘時預警" (SPEC step 6) — worth warning about, not yet an
-// emergency; the real backstop is the auto-pause below.
 const LOW_BALANCE_WARNING_MINUTES = 10;
-// Host WS reconnects (network blip) must NOT stop billing — host.js's own
-// reconnect backoff caps at 10s, so any gap under this is routine. Only a
-// gap this long is treated as "host actually walked away" (closed the tab,
-// lost power, etc.) and stops the meter so a dead session can't rack up
-// charges against nobody's audio.
 const BILLING_DISCONNECT_GRACE_MS = 90 * 1000;
-
-// Gate for /api/temporary-key only (see comment above). Writes the error
-// response itself and returns false on failure so the caller can just
-// `if (!authorizeHost(...)) return;`.
-function authorizeHost(req, res) {
-  if (!process.env.HOST_SECRET) {
-    console.error('HOST_SECRET is not set — refusing host-only request. Set HOST_SECRET in .env before going live.');
-    res.writeHead(500, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Server misconfigured: HOST_SECRET not set' }));
-    return false;
-  }
-  if (!isValidHostSecret(req.headers['x-host-secret'])) {
-    res.writeHead(401, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Unauthorized' }));
-    return false;
-  }
-  return true;
-}
 
 // ---------------------------------------------------------------------------
 // Google login (SPEC §3a) — Passport + express-session, no external hosted
@@ -169,7 +129,7 @@ function parseAllowlist(raw) {
 }
 const LOGIN_ALLOWLIST = parseAllowlist(process.env.LOGIN_ALLOWLIST);
 // Public-launch switch (SPEC step 2): once true, ANY Google account may log
-// in/register (a fresh one starting at credits = 0, upsert logic unchanged)
+// in/register (a fresh one starting at credits = 50, upsert logic unchanged)
 // and LOGIN_ALLOWLIST below is never consulted. Deliberately NOT the
 // default — flip this on only after the credit gate + auto-pause (SPEC step
 // 6) has been verified working, per the ordering note in .env.example: this
@@ -290,14 +250,14 @@ function serveFile(res, filePath) {
 // nothing is shared, so there is nothing left to cross-broadcast into.
 //
 // Two different identifiers, never interchangeable (see SPEC §3):
-//   - `id`: internal, permanent-for-the-life-of-the-process, never appears
+//   - `id`: internal, never appears
 //     in a public URL. The host page gets it once, straight from an
 //     authenticated POST /api/sessions response, and uses it only over its
 //     own WebSocket registration — never rendered into the QR/viewer link.
 //   - `joinCode`: the public, capability-based ticket. Anyone holding it can
 //     watch; it's what goes in the QR code and the viewer URL.
 // ---------------------------------------------------------------------------
-const sessions = new Map();           // id -> session
+export const sessions = new Map();           // id -> session
 const sessionsByJoinCode = new Map(); // joinCode -> id
 
 const JOIN_CODE_ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789'; // no 0/o/1/i/l — avoids read-aloud ambiguity
@@ -352,28 +312,26 @@ async function createUniqueOrderCode() {
 // created: QR issued, host not broadcasting yet, viewers can't watch.
 // live: host is broadcasting, calibrating, viewers can watch.
 // ended: host closed the session for good; join_code no longer admits anyone.
-function createSession(userId) {
-  const id = crypto.randomUUID();
-  const joinCode = createUniqueJoinCode();
+function createSession(userId, row = null) {
+  const id = row?.id || crypto.randomUUID();
+  const joinCode = row?.join_code || createUniqueJoinCode();
   const session = {
     id,
     joinCode,
-    name: null,
-    status: 'created',
+    name: row?.name || null,
+    status: row?.status || 'created',
+    transcriptWarning: Boolean(row?.transcript_warning),
+    displayAfterSeq: Number(row?.display_after_seq || 0),
     // Owning user (SPEC step 6): who to charge/credit-check for this
     // session's per-minute billing. Always set — every session now requires
     // login to create (see POST /api/sessions) — but kept nullable-safe
     // throughout the billing helpers below in case an old in-memory session
     // somehow predates this field.
     userId: userId || null,
-    // Billing state (SPEC step 6), all reset on every host_start:
-    // billingRate = credits/minute for the CURRENT recording stint,
-    // billingTimer = the setInterval charging it, lowBalanceWarned = have we
-    // already sent the ~10-min warning for this stint (so it fires once, not
-    // every tick), disconnectGraceTimer = pending "host really left" timeout
-    // (see BILLING_DISCONNECT_GRACE_MS).
+    // Actual audio metering belongs to the authenticated relay.
+    audioRelay: null,
+    audioMeterStates: {},
     billingRate: null,
-    billingTimer: null,
     lowBalanceWarned: false,
     disconnectGraceTimer: null,
     // Set the instant a host WS disconnects while this session is
@@ -383,20 +341,20 @@ function createSession(userId) {
     // what the long-TTL sweep below measures "how long has host actually
     // been gone" against, independent of whether that short grace timer has
     // fired yet.
-    hostDisconnectedAt: null,
+    hostDisconnectedAt: row ? Date.now() : null,
     // null = host hasn't clicked Start yet (unknown); [] = pure transcription
     // (translation off); [lang] = one_way translation to `lang`. Set once at
-    // host_start and never changed after — see the host_start handler below.
+    // audio connection config; updated when provider confirms first audio.
     // Viewers read this (via session_status) to decide their layout at join
     // time, without waiting for/guessing from actual utterance content.
-    targetLangs: null,
+    targetLangs: row?.target_langs || null,
     hostWs: null,
     viewers: new Set(),
     history: [],   // oldest → newest, capped at HISTORY_MAX
-    nextId: 1,
-    createdAt: Date.now(),
-    startedAt: null,
-    endedAt: null,
+    nextId: Number(row?.next_seq || 1),
+    createdAt: row ? new Date(row.created_at).getTime() : Date.now(),
+    startedAt: row?.started_at ? new Date(row.started_at).getTime() : null,
+    endedAt: row?.ended_at ? new Date(row.ended_at).getTime() : null,
     // Fire-and-forget TranscriptLine INSERT promises still in flight (see
     // pushUtterance). Never awaited on the broadcast path — only drained by
     // host_end_session before it reads the transcript back for batch
@@ -473,17 +431,20 @@ const app = express();
 app.set('trust proxy', 1);
 
 const PgSessionStore = connectPgSimple(session);
-app.use(session({
-  store: pool ? new PgSessionStore({ pool, tableName: 'user_sessions', createTableIfMissing: true }) : undefined,
+export const sessionStore = pool ? new PgSessionStore({ pool, tableName: 'user_sessions', createTableIfMissing: true }) : new session.MemoryStore();
+const sessionMiddleware = session({
+  store: sessionStore,
   secret: SESSION_SECRET,
   resave: false,
   saveUninitialized: false,
   cookie: {
     httpOnly: true,
+    sameSite: 'lax',
     secure: process.env.NODE_ENV === 'production',
     maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
   },
-}));
+});
+app.use(sessionMiddleware);
 app.use(passport.initialize());
 app.use(passport.session());
 
@@ -498,57 +459,15 @@ app.use((err, req, res, next) => {
   next(err);
 });
 
-// The real cost gate (SPEC step 6): this is the one endpoint that actually
-// causes Soniox spend, so it's where credits are checked, not just at
-// host_start over the WS (that check exists too, for session-state
-// consistency, but a client could in principle skip straight to this
-// endpoint — this one has to hold on its own). targetLangCount comes from
-// the client (host.js reads it off the same checkbox state host_start
-// does) so the rate matches whatever the host is actually about to record
-// with; an invalid/missing value is clamped to 0 (cheapest, pure-
-// transcription rate) rather than trusted as something higher.
-app.post('/api/temporary-key', async (req, res) => {
-  if (!authorizeHost(req, res)) return;
-  if (!req.isAuthenticated()) {
-    res.status(401).json({ error: 'login_required' });
-    return;
-  }
-  const targetLangCount = Number.isInteger(req.body.targetLangCount) && req.body.targetLangCount > 0
-    ? req.body.targetLangCount
-    : 0;
-  const requiredCredits = creditsPerMinuteFor(targetLangCount);
-  let credits;
-  try {
-    credits = await dbGetUserCredits(req.user.id);
-  } catch (err) {
-    console.error(`[db] failed to read credits for user ${req.user.id}:`, err);
-    res.status(500).json({ error: 'Failed to check credits' });
-    return;
-  }
-  // null (DB unreachable, or user row missing) is treated the same as "not
-  // enough" — see dbGetUserCredits's own comment: this is the cost defense,
-  // it does not get to fail open.
-  if (credits === null || credits < requiredCredits) {
-    res.status(402).json({ error: 'insufficient_credits', credits: credits ?? 0, required: requiredCredits });
-    return;
-  }
-  try {
-    // usage_type must be "transcribe_websocket" for real-time STT (per @soniox/node types).
-    const { api_key, expires_at } = await soniox.auth.createTemporaryKey({
-      usage_type: 'transcribe_websocket',
-      expires_in_seconds: 300,
-    });
-    res.status(200).json({ api_key, expires_at });
-  } catch (err) {
-    console.error('createTemporaryKey failed:', err);
-    res.status(500).json({ error: 'Failed to create temporary key' });
-  }
+// Retired: browsers never receive provider credentials, even after login.
+app.post('/api/temporary-key', requireLoginApi, (req, res) => {
+  res.status(410).json({ error: '請重新整理頁面，使用新的字幕場次開播流程' });
 });
 
 // Creates a new session (SPEC §2/§4): generates the internal id + public
 // join_code, in status `created`, owned by the logged-in user (SPEC §3a
 // point 3 — this replaces the old shared host-secret gate for this one
-// endpoint; see requireLoginApi/authorizeHost comments above).
+// endpoint; see requireLoginApi above).
 app.post('/api/sessions', requireLoginApi, async (req, res) => {
   const session = createSession(req.user.id);
   // DB is the source of truth for session metadata (SPEC §6.5); this is an
@@ -560,6 +479,8 @@ app.post('/api/sessions', requireLoginApi, async (req, res) => {
     await dbInsertSession({ id: session.id, joinCode: session.joinCode, name: session.name, userId: req.user.id });
   } catch (err) {
     console.error(`[db] failed to insert session ${session.id}:`, err);
+    sessions.delete(session.id); sessionsByJoinCode.delete(session.joinCode);
+    return res.status(503).json({error:'場次保存失敗，請稍後重試'});
   }
   const viewerUrl = `${getOrigin(req)}/viewer2?code=${session.joinCode}`;
   let qrDataUrl = null;
@@ -585,6 +506,7 @@ app.get('/api/sessions', requireLoginApi, async (req, res) => {
       createdAt: row.created_at,
       startedAt: row.started_at,
       endedAt: row.ended_at,
+      expiresAt: row.expires_at, transcriptExpired: Boolean(row.transcript_expired_at || (row.expires_at && new Date(row.expires_at)<=new Date())), transcriptWarning: row.transcript_warning,
     })));
   } catch (err) {
     console.error(`[db] failed to list sessions for user ${req.user.id}:`, err);
@@ -666,12 +588,14 @@ app.delete('/api/sessions/:id', requireLoginApi, async (req, res) => {
 app.post('/api/sessions/:id/end', requireLoginApi, async (req, res) => {
   const { id } = req.params;
   if (!(await authorizeSessionOwner(req, res, id))) return;
+  if(req.body?.transcriptIncomplete) await dbMarkTranscriptWarning(id);
   const liveSession = sessions.get(id);
   try {
     if (liveSession) {
       await endSession(liveSession); // updates memory + DB + broadcasts + cleanup
     } else {
       await dbMarkSessionEnded(id);
+      await runTranscriptCleanup(id);
     }
   } catch (err) {
     console.error(`[db] failed to end session ${id}:`, err);
@@ -702,8 +626,7 @@ app.get('/api/me', (req, res) => {
 // --- Credits / top-up (SPEC steps 3/6) --------------------------------------
 
 // Host.js polls this before ever attempting Start (SPEC step 6 "開場預
-// 檢") — a client-side courtesy check only; /api/temporary-key is the
-// endpoint that actually enforces it.
+// 檢") — display only; the server-side audio relay enforces the balance.
 app.get('/api/credits', requireLoginApi, async (req, res) => {
   try {
     const credits = await dbGetUserCredits(req.user.id);
@@ -788,7 +711,7 @@ app.patch('/api/orders/:id/last-five', requireLoginApi, async (req, res) => {
 // 6): 404 if the session doesn't exist, 403 if it exists but belongs to
 // someone else (or to nobody — a pre-phase-3a session with user_id null,
 // which can never equal a real logged-in user's id). Writes the response
-// itself on failure, same calling convention as authorizeHost.
+// itself on failure, with an explicit response on failure.
 async function authorizeSessionOwner(req, res, id) {
   let owner;
   try {
@@ -856,6 +779,7 @@ app.get('/api/sessions/:id/transcript', requireLoginApi, async (req, res) => {
     status: row.status,
     processingStatus: row.processing_status,
     cleanedTranscript: row.cleaned_transcript,
+    expiresAt: row.expires_at, transcriptExpired: Boolean(row.transcript_expired_at || (row.expires_at && new Date(row.expires_at)<=new Date())), transcriptWarning: row.transcript_warning,
   });
 });
 
@@ -882,11 +806,28 @@ app.post('/api/sessions/:id/transcript/retry', requireLoginApi, async (req, res)
     res.status(400).json({ error: 'session_not_ended' });
     return;
   }
-  runTranscriptCleanup(id).catch((err) => {
-    console.error(`[transcript-cleanup] retry for session ${id} threw unexpectedly:`, err);
-  });
+  if (row.transcript_expired_at || (row.expires_at && new Date(row.expires_at)<=new Date())) return res.status(410).json({error:"逐字稿已到期刪除"});
+  try { await runTranscriptCleanup(id); } catch (err) { return res.status(503).json({error:'無法排入整理，請稍後重試'}); }
   res.status(202).json({ id, processingStatus: 'processing' });
 });
+
+
+app.get('/api/sessions/:id/transcript/raw',requireLoginApi,async(req,res)=>{
+  const {id}=req.params;
+  if(!(await authorizeSessionOwner(req,res,id)))return;
+  const row=await dbGetSessionTranscript(id);
+  if(!row)return res.status(404).json({error:'session_not_found'});
+  if(row.transcript_expired_at || (row.expires_at && new Date(row.expires_at)<=new Date())) return res.status(410).json({error:'逐字稿已到期刪除'});
+  const lines=await dbGetRawTranscript(id);
+  res.setHeader('Content-Type','text/plain; charset=utf-8');
+  res.setHeader('Content-Disposition','attachment; filename="transcript-raw.txt"');
+  res.setHeader('Cache-Control','no-store');
+  res.send((row.transcript_warning?'注意：本場曾發生字幕保存或補送異常，原稿可能不完整。\n\n':'')+lines.map(line=>line.original_text).join('\n'));
+});
+app.get('/api/billing',requireLoginApi,async(req,res)=>res.json(await dbGetBillingHistory(req.user.id)));
+app.get('/api/service-info',(req,res)=>res.json({supportEmail:process.env.SUPPORT_EMAIL||'hmyculture@gmail.com',topupResponse:'下一個工作日內確認入帳',retentionDays:30}));
+app.get('/billing',requireLoginPage,(req,res)=>serveFile(res,path.join(PUBLIC_DIR,'billing.html')));
+app.get('/privacy',(req,res)=>serveFile(res,path.join(PUBLIC_DIR,'privacy.html')));
 
 // --- Google login routes (SPEC §3a point 1) --------------------------------
 
@@ -944,7 +885,8 @@ app.get('/vendor/opencc-cn2t.mjs', (req, res) => serveFile(res, VENDOR_OPENCC));
 // login. The old single-page Soniox test page moved to /single (no route
 // change to that page itself — still index.html).
 app.get('/', (req, res) => serveFile(res, path.join(PUBLIC_DIR, 'landing.html')));
-app.get('/single', (req, res) => serveFile(res, path.join(PUBLIC_DIR, 'index.html')));
+app.get(['/single', '/index.html'], (req, res) => res.redirect('/sessions'));
+app.get('/app.js', (req, res) => res.status(410).send('Legacy recording entry retired'));
 
 // Landing spot for a rejected /auth/google/callback (allowlist miss or any
 // other OAuth failure) — public, no login, explains what happened instead
@@ -954,13 +896,16 @@ app.get('/login-failed', (req, res) => serveFile(res, path.join(PUBLIC_DIR, 'log
 // /host is now open to guests (SPEC guest-mode): a signed-out visitor can
 // browse the settings panel and top-up plans without logging in first — only
 // pressing Start or actually creating an order requires login (enforced at
-// those specific endpoints below: /api/temporary-key, the WS host_start
+// the authenticated audio relay and session APIs below.
 // handler, /api/orders — all unchanged). Passport's session middleware above
 // still runs regardless, so req.user/req.isAuthenticated() are populated
 // exactly as before whenever a login cookie IS present; this route just stops
 // forcing a redirect when it's absent. /sessions has no guest use (a signed-
 // out visitor owns no sessions to list) so it stays fully gated.
-app.get('/host', (req, res) => serveFile(res, path.join(PUBLIC_DIR, 'host.html')));
+app.get('/host', (req, res) => {
+  if (req.isAuthenticated() && !req.query.id) return res.redirect('/sessions');
+  serveFile(res, path.join(PUBLIC_DIR, 'host.html'));
+});
 app.get('/sessions', requireLoginPage, (req, res) => serveFile(res, path.join(PUBLIC_DIR, 'sessions.html')));
 
 // Viewer flow stays completely open — no login, ever (SPEC §3a "不要碰的").
@@ -971,7 +916,7 @@ app.get('/viewer2', (req, res) => serveFile(res, path.join(PUBLIC_DIR, 'viewer2.
 // for GET / and silently shadow the landing page route above.
 app.use(express.static(PUBLIC_DIR, { index: false }));
 
-const server = http.createServer(app);
+export const server = http.createServer(app);
 
 // ---------------------------------------------------------------------------
 // WebSocket layer: host/viewer roles, §3 unified utterance contract, history
@@ -1003,43 +948,42 @@ function sendViewerCount(session) {
   send(session.hostWs, { type: 'viewer_count', count: session.viewers.size });
 }
 
-function pushUtterance(session, { original, translations }) {
-  const utterance = {
-    type: 'utterance',
-    id: session.nextId++,
-    ts: Date.now(),
-    original: original || '',
-    translations: translations && typeof translations === 'object' ? translations : {},
-  };
-  session.history.push(utterance);
-  if (session.history.length > HISTORY_MAX) session.history.shift();
-  broadcastToViewers(session, utterance);
-
-  // Persistence never gates the broadcast above — this fires after viewers
-  // already have the utterance, and a DB hiccup here only gets logged, never
-  // surfaced to host/viewers (SPEC §6.5: "不可等散場", "廣播絕不等待 DB").
-  // Tracked in pendingInserts so host_end_session can drain it before the
-  // batch cleanup reads the transcript back — see the field comment above.
-  const insertPromise = dbInsertTranscriptLine(session.id, utterance.id, utterance.ts, utterance.original).catch((err) => {
-    console.error(`[db] failed to insert transcript line session=${session.id} seq=${utterance.id}:`, err);
-  });
-  session.pendingInserts.add(insertPromise);
-  insertPromise.finally(() => session.pendingInserts.delete(insertPromise));
+async function pushUtterance(session,msg,ws) {
+  if(typeof msg.clientMessageId!=='string'||msg.clientMessageId.length>80||!msg.clientMessageId||typeof msg.original!=='string'||msg.original.length>12000||!msg.original.trim())return;
+  const ts=Number(msg.ts);
+  if(!Number.isFinite(ts)||ts>Date.now()+60_000||Date.now()-ts>5*60_000){
+    session.transcriptWarning=true;
+    await dbMarkTranscriptWarning(session.id);
+    send(ws,{type:'utterance_rejected',clientMessageId:msg.clientMessageId});return;
+  }
+  const translations={};
+  for(const [lang,text] of Object.entries(msg.translations||{})){
+    if(/^[a-z]{2,3}$/.test(lang)&&typeof text==='string'&&text.length<=12000)translations[lang]=text;
+  }
+  try{
+    const result=await dbCommitTranscript(session.id,{...msg,ts,translations});
+    const row=result.row;
+    const utterance={type:'utterance',id:Number(row.seq),ts:new Date(row.ts).getTime(),original:row.original_text,translations:row.translations};
+    if(result.inserted){
+      session.nextId=Math.max(session.nextId,utterance.id+1);
+      session.history.push(utterance);
+      if(session.history.length>HISTORY_MAX)session.history.shift();
+      broadcastToViewers(session,utterance);
+    }
+    if(session.transcriptWarning)await dbMarkTranscriptWarning(session.id);
+    send(ws,{type:'utterance_ack',clientMessageId:msg.clientMessageId});
+  }catch(error){
+    session.transcriptWarning=true;
+    await dbMarkTranscriptWarning(session.id).catch(()=>{});
+    send(ws,{type:'transcript_warning',message:'字幕尚未保存，正在補送；請先不要關閉頁面。'});
+  }
 }
 
 // ---------------------------------------------------------------------------
-// Per-minute billing (SPEC step 6) — the only cost defense once signup is
-// open to the public. Lives entirely on the in-memory `session` object
-// (billingTimer/billingRate/lowBalanceWarned/disconnectGraceTimer, see
-// createSession) so it survives a host WS reconnect untouched: the timer is
-// keyed to the session, not to any one WebSocket instance.
+// Audio usage is metered by the server-side relay, never a host message.
 // ---------------------------------------------------------------------------
-
-function clearBillingTimer(session) {
-  if (session.billingTimer) {
-    clearInterval(session.billingTimer);
-    session.billingTimer = null;
-  }
+function stopSessionAudio(session) {
+  session.audioRelay?.close();
 }
 
 function clearDisconnectGrace(session) {
@@ -1057,9 +1001,11 @@ function clearDisconnectGrace(session) {
 // (no in-memory session object, e.g. after a server restart) fall back to
 // dbMarkSessionEnded directly instead of calling this.
 async function endSession(session) {
-  clearBillingTimer(session);
+  stopSessionAudio(session);
   clearDisconnectGrace(session);
   if (session.status === 'ended') return;
+  await Promise.allSettled(session.pendingInserts);
+  await dbMarkSessionEnded(session.id);
   session.status = 'ended';
   session.endedAt = Date.now();
   console.log(`[session ${session.id}] ended`);
@@ -1072,26 +1018,8 @@ async function endSession(session) {
   // the very last utterance is still mid-flight when cleanup reads the
   // transcript back (see pushUtterance/pendingInserts).
   await Promise.allSettled(session.pendingInserts);
-  try {
-    await dbMarkSessionEnded(session.id);
-  } catch (err) {
-    console.error(`[db] failed to mark session ${session.id} ended:`, err);
-  }
-  await runTranscriptCleanup(session.id);
-}
 
-// Auto-pause (SPEC step 6, the critical one): stop the meter and tell the
-// host to stop recording, but touch NOTHING about the session's lifecycle —
-// status stays 'live', join_code keeps admitting viewers, viewers' own
-// connections are untouched. This is exactly what host.js's own Pause
-// button already does server-side (nothing) — the only new part is telling
-// the host's browser to actually stop Soniox, since the server can't do
-// that itself (audio goes straight from the host's browser to Soniox, never
-// through this server).
-function autoPauseForInsufficientCredits(session, credits) {
-  clearBillingTimer(session);
-  console.log(`[billing] session ${session.id} auto-paused — user ${session.userId} out of credits (${credits})`);
-  send(session.hostWs, { type: 'force_pause', reason: 'insufficient_credits', credits });
+  await runTranscriptCleanup(session.id).catch(error=>console.error('[cleanup] queue will recover on restart:',error.message));
 }
 
 function maybeWarnLowBalance(session, credits) {
@@ -1103,56 +1031,101 @@ function maybeWarnLowBalance(session, credits) {
   }
 }
 
-// Prepay model: charges for the NEXT minute of recording before it happens
-// (called once immediately at Start, then once per BILLING_TICK_MS after) —
-// this is what makes "見底自動暫停" actually mean *before* running a minute
-// the user can't afford, not after. dbChargeCredits's own WHERE credits >=
-// amount makes the charge atomic, so this is safe even if somehow called
-// concurrently for the same user.
-async function chargeNextMinute(session) {
-  if (!session.billingRate || !session.userId) return;
-  const rate = session.billingRate;
-  let newBalance;
+const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
+const audioWss = new WebSocketServer({ noServer: true, maxPayload: 256 * 1024 });
+const activeAudioUsers = new Map();
+const audioAttempts = new Map();
+const supportedLanguages = new Set(LANGUAGES.map((language) => language.code));
+
+// A browser can only open our sockets from this site's origin. Google login
+// is resolved from the signed, httpOnly session cookie during the upgrade.
+server.on('upgrade', async (req, socket, head) => {
+  socket.on('error', () => {});
+  const reject = (status) => {
+    if (!socket.destroyed) socket.end('HTTP/1.1 ' + status + ' Rejected\r\nConnection: close\r\n\r\n');
+  };
   try {
-    newBalance = await dbChargeCredits(session.userId, rate);
+    if (req.headers.origin !== getOrigin(req)) return reject(403);
+    const url = new URL(req.url, 'http://localhost');
+    if (!['/', '/audio'].includes(url.pathname)) return reject(404);
+    await new Promise((resolve, reject) => {
+      const res = new http.ServerResponse(req);
+      sessionMiddleware(req, res, (err) => err ? reject(err) : resolve());
+    });
+    const userId = req.session?.passport?.user;
+    req.authUserId = userId && await dbGetUserById(userId) ? userId : null;
+    if (socket.destroyed) return;
+    if (url.pathname === '/audio') {
+      const room = sessions.get(url.searchParams.get('sessionId'));
+      if (!req.authUserId) return reject(401);
+      if (!room || room.userId !== req.authUserId || room.status === 'ended') return reject(403);
+      if (!room.hostWs || room.hostWs.readyState !== WebSocket.OPEN) return reject(409);
+      if (activeAudioUsers.has(req.authUserId)) return reject(409);
+      const now = Date.now();
+      for (const [key, value] of audioAttempts) if (now - value.since > 60_000) audioAttempts.delete(key);
+      const attempts = audioAttempts.get(req.authUserId) || { since: now, count: 0 };
+      if (++attempts.count > 10) return reject(429);
+      audioAttempts.set(req.authUserId, attempts);
+      // handleUpgrade is synchronous here (no verifyClient callback). Claim
+      // only after a valid handshake so malformed requests cannot strand a slot.
+      audioWss.handleUpgrade(req, socket, head, (ws) => {
+        activeAudioUsers.set(req.authUserId, room.id);
+        audioWss.emit('connection', ws, room);
+      });
+    } else {
+      wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
+    }
   } catch (err) {
-    // DB down mid-session: unlike most of this app, billing fails CLOSED —
-    // this feature's entire job is cost containment, so silently letting
-    // recording continue unmetered through an outage would defeat it.
-    console.error(`[billing] charge failed for session ${session.id} (user ${session.userId}), pausing:`, err);
-    autoPauseForInsufficientCredits(session, null);
-    return;
+    console.error('[ws] upgrade failed:', err.message);
+    reject(503);
   }
-  if (newBalance === null) {
-    let credits = null;
-    try { credits = await dbGetUserCredits(session.userId); } catch { /* best-effort for the message only */ }
-    autoPauseForInsufficientCredits(session, credits ?? 0);
-    return;
-  }
-  dbInsertUsageLedger({
-    sessionId: session.id,
-    userId: session.userId,
-    creditsCharged: rate,
-    targetLangCount: session.targetLangs ? session.targetLangs.length : 0,
-    balanceAfter: newBalance,
-  }).catch((err) => {
-    console.error(`[db] failed to record usage_ledger for session ${session.id}:`, err);
+});
+
+audioWss.on('connection', (ws, room) => {
+  room.audioMeterStates ||= {};
+  room.lowBalanceWarned = false;
+  const relay = attachAudioRelay(ws, {
+    apiKey: process.env.SONIOX_API_KEY,
+    languages: supportedLanguages,
+    meterStates: room.audioMeterStates,
+    getCredits: () => dbGetUserCredits(room.userId),
+    loadMeter: rate => dbGetAudioMeter(room.id,rate),
+    saveMeter: (rate,state) => dbSaveAudioMeter(room.id,rate,state),
+    charge: async (rate,minute) => {
+      room.billingRate = rate;
+      const balance = await dbChargeSessionMinute(room.userId, room.id, rate, minute);
+      if (balance !== null) {
+        send(room.hostWs, { type: 'credits_update', credits: balance });
+        maybeWarnLowBalance(room, balance);
+      }
+      return balance;
+    },
+    onStarted: async (config) => {
+      if (room.status === 'ended') return;
+      const firstStart = !room.startedAt;
+      room.status = 'live';
+      room.startedAt ||= Date.now();
+      room.targetLangs = config.translation ? [config.translation.target_language] : [];
+      broadcastToViewers(room, { type: 'session_status', status: 'live', targetLangs: room.targetLangs, name: room.name });
+      send(room.hostWs, { type: 'recording_started' });
+      await (firstStart ? dbMarkSessionLive(room.id) : dbMarkSessionResumed(room.id));
+      await dbSetSessionLanguages(room.id, { sourceLangs: config.language_hints || ['auto'], targetLangs: room.targetLangs });
+    },
+    onStopped: () => {
+      if (room.audioRelay === relay) room.audioRelay = null;
+      activeAudioUsers.delete(room.userId);
+      // Keep live during final text delivery. A new relay cancels this pause.
+      setTimeout(() => {
+        if (room.audioRelay || room.status !== 'live') return;
+        room.status = 'paused';
+        broadcastToViewers(room, { type: 'session_status', status: 'paused', targetLangs: room.targetLangs, name: room.name });
+        dbMarkSessionPaused(room.id).catch((err) => console.error('[db] pause failed:', err));
+      }, 1000).unref();
+    },
+    onInsufficient: (credits) => send(room.hostWs, { type: 'force_pause', reason: 'insufficient_credits', credits }),
   });
-  send(session.hostWs, { type: 'credits_update', credits: newBalance });
-  maybeWarnLowBalance(session, newBalance);
-}
-
-// Called once per successful host_start (see the WS handler below) — starts
-// the meter for this recording stint at the rate that was just agreed on.
-function startBilling(session, rate) {
-  clearBillingTimer(session); // defensive: never let two timers stack on one session
-  session.billingRate = rate;
-  session.lowBalanceWarned = false;
-  chargeNextMinute(session); // pay for the minute that's about to start
-  session.billingTimer = setInterval(() => chargeNextMinute(session), BILLING_TICK_MS);
-}
-
-const wss = new WebSocketServer({ server });
+  room.audioRelay = relay;
+});
 
 // Heartbeat: some networks (mobile wifi handoffs, NAT idle timeouts) drop a
 // connection one-sidedly without ever sending a TCP FIN/RST, so the browser's
@@ -1162,21 +1135,39 @@ const wss = new WebSocketServer({ server });
 // existing reconnect logic.
 const HEARTBEAT_INTERVAL = 15000;
 
-wss.on('connection', (ws) => {
+wss.on('connection', (ws, req) => {
+  ws.on('error', () => ws.terminate());
   let role = null;
   let sessionId = null; // resolved at register time from sessionId (host) or joinCode (viewer)
   ws.isAlive = true;
   ws.on('pong', () => { ws.isAlive = true; });
 
-  ws.on('message', async (raw) => {
+  let messageChain=Promise.resolve();
+  ws.on('message',raw=>{
+    messageChain=messageChain.then(()=>handleMessage(raw)).catch(error=>{
+      console.error('[ws] message:',error.message);
+      send(ws,{type:'transcript_warning',message:'保存暫時失敗，請保持頁面開啟等待重試。'});
+    });
+  });
+  async function handleMessage(raw) {
     let msg;
     try { msg = JSON.parse(raw); } catch { return; }
+    if (!msg || typeof msg !== 'object' || Array.isArray(msg)) return;
 
     if (msg.type === 'register') {
+      if (role) return; // one socket cannot change roles or rooms
       if (msg.role === 'host') {
         const session = typeof msg.sessionId === 'string' ? sessions.get(msg.sessionId) : null;
         if (!session) {
           send(ws, { type: 'register_error', reason: 'session_not_found' });
+          return;
+        }
+        if (!req.authUserId || session.userId !== req.authUserId || (session.status === 'ended' && Date.now()-session.endedAt>5*60_000)) {
+          send(ws, { type: 'register_error', reason: 'not_authorized' });
+          return;
+        }
+        if (session.hostWs && session.hostWs !== ws && session.hostWs.readyState === WebSocket.OPEN) {
+          send(ws, { type: 'register_error', reason: 'host_already_connected' });
           return;
         }
         role = 'host';
@@ -1191,6 +1182,7 @@ wss.on('connection', (ws) => {
         session.hostDisconnectedAt = null;
         console.log(`[host] connected session=${session.id}`);
         sendViewerCount(session);
+        send(ws, { type: 'host_registered', transcriptWarning:session.transcriptWarning });
       } else if (msg.role === 'viewer') {
         const targetId = typeof msg.joinCode === 'string' ? sessionsByJoinCode.get(msg.joinCode) : null;
         const session = targetId ? sessions.get(targetId) : null;
@@ -1204,7 +1196,7 @@ wss.on('connection', (ws) => {
         console.log(`[viewer+] session=${session.id} total=${session.viewers.size}`);
         sendViewerCount(session);
         send(ws, { type: 'session_status', status: session.status, targetLangs: session.targetLangs, name: session.name });
-        if (session.status === 'live') {
+        if (session.status === 'live' || session.status === 'paused') {
           send(ws, { type: 'backfill', utterances: session.history.slice(-BACKFILL_COUNT) });
         }
       }
@@ -1216,104 +1208,12 @@ wss.on('connection', (ws) => {
     // nothing to act on.
     const session = sessionId ? sessions.get(sessionId) : null;
     if (!session) return;
+    if (role === 'host' && session.hostWs !== ws) return;
 
-    // Host clicked Start (SPEC §4 state machine): created → live, exactly
-    // once — a later pause/Start cycle re-sends this while already live, and
-    // must NOT reset startedAt or re-fire dbMarkSessionLive.
-    //
-    // Settings sync (targetLangs/sourceLangs → session object, DB, and the
-    // viewer broadcast below), by contrast, runs on EVERY host_start, first
-    // or not: pausing to change source/target language and pressing Start
-    // again reuses this same session/join_code (SPEC: join_code never
-    // changes), so this is the only place that change can ever reach the
-    // server, the DB record, and already-connected viewers. Previously this
-    // whole block was gated behind the created→live transition, so a
-    // mid-session settings change silently never left the host's browser.
-    if (role === 'host' && msg.type === 'host_start') {
-      if (session.status === 'ended') return; // can't restart an ended session
-
-      // Credit gate (SPEC step 6): computed from what the host is actually
-      // about to (re)start with, same formula as /api/temporary-key's own
-      // check (creditsPerMinuteFor) so the two never disagree about whether
-      // this stint is affordable. A rejection here changes NOTHING about
-      // session/targetLangs/DB state — from the session's point of view it's
-      // as if Start was never pressed. host.js's own pre-check and the
-      // /api/temporary-key 402 are what the host actually sees; this is the
-      // backstop that keeps server-side session state consistent with that.
-      const wantsTargetLangs = msg.translateEnabled && typeof msg.targetLanguage === 'string'
-        ? [msg.targetLanguage]
-        : [];
-      const rate = creditsPerMinuteFor(wantsTargetLangs.length);
-      let credits = null;
-      try {
-        credits = session.userId ? await dbGetUserCredits(session.userId) : null;
-      } catch (err) {
-        console.error(`[db] failed to read credits for user ${session.userId}:`, err);
-      }
-      if (credits === null || credits < rate) {
-        console.log(`[billing] session ${session.id} host_start rejected — user ${session.userId} has ${credits ?? 0} credits, needs ${rate}`);
-        return;
-      }
-
-      // Host clicked Start (SPEC §4 state machine): created → live, exactly
-      // once — a later pause/Start cycle re-sends this while already live, and
-      // must NOT reset startedAt or re-fire dbMarkSessionLive. A session the
-      // server itself auto-paused (SPEC fix "場次沒結束一直掛 live" — see
-      // endSession/hostDisconnectedAt and the 'paused' status below) can also
-      // resume from here: same reused join_code, but startedAt is untouched
-      // since it was never really a fresh session.
-      //
-      // Settings sync (targetLangs/sourceLangs → session object, DB, and the
-      // viewer broadcast below), by contrast, runs on EVERY host_start, first
-      // or not: pausing to change source/target language and pressing Start
-      // again reuses this same session/join_code (SPEC: join_code never
-      // changes), so this is the only place that change can ever reach the
-      // server, the DB record, and already-connected viewers. Previously this
-      // whole block was gated behind the created→live transition, so a
-      // mid-session settings change silently never left the host's browser.
-      const firstStart = session.status === 'created';
-      const resumingFromPause = session.status === 'paused';
-      session.hostDisconnectedAt = null; // host is clearly back, whatever the long-TTL sweep thought
-      if (firstStart) {
-        session.status = 'live';
-        session.startedAt = Date.now();
-        console.log(`[session ${session.id}] live`);
-      } else if (resumingFromPause) {
-        session.status = 'live';
-        console.log(`[session ${session.id}] resumed from paused`);
-      }
-      // What the host actually chose, for viewers (session_status, read at
-      // join time AND on every subsequent broadcast — see targetLangs
-      // comment on the session object) and for the DB record (SPEC §6.5).
-      session.targetLangs = wantsTargetLangs;
-      broadcastToViewers(session, { type: 'session_status', status: 'live', targetLangs: session.targetLangs, name: session.name });
-      if (firstStart) {
-        dbMarkSessionLive(session.id).catch((err) => {
-          console.error(`[db] failed to mark session ${session.id} live:`, err);
-        });
-      } else if (resumingFromPause) {
-        dbMarkSessionResumed(session.id).catch((err) => {
-          console.error(`[db] failed to mark session ${session.id} resumed:`, err);
-        });
-      }
-      // sourceLangs is host.js's language_hints selection (['auto'] or a
-      // list of codes — see currentSourceLangSelection there); record-only,
-      // same as targetLangs above — falls back to ['auto'] for a malformed
-      // message rather than silently recording nothing.
-      const sourceLangs = Array.isArray(msg.sourceLangs) && msg.sourceLangs.length ? msg.sourceLangs : ['auto'];
-      dbSetSessionLanguages(session.id, { sourceLangs, targetLangs: session.targetLangs }).catch((err) => {
-        console.error(`[db] failed to record language settings for session ${session.id}:`, err);
-      });
-      startBilling(session, rate);
-      return;
-    }
-
-    // New (SPEC step 6): host clicked Pause — mirrors host_start's role for
-    // billing. Doesn't touch session.status/history/viewers at all (that's
-    // the whole point of Pause — see host.js), only stops the meter so a
-    // paused session never keeps getting charged for audio that stopped.
+    // Legacy start messages never authorize audio or trigger a debit.
+    if (role === 'host' && msg.type === 'host_start') return;
     if (role === 'host' && msg.type === 'host_stop') {
-      clearBillingTimer(session);
+      session.audioRelay?.close();
       return;
     }
 
@@ -1333,8 +1233,13 @@ wss.on('connection', (ws) => {
     }
 
     if (role === 'host' && msg.type === 'host_utterance') {
-      if (session.status === 'live') pushUtterance(session, msg);
+      if(['live','paused','ended'].includes(session.status)) { const pending=pushUtterance(session,msg,ws);session.pendingInserts.add(pending);try{await pending;}finally{session.pendingInserts.delete(pending);} }
       return;
+    }
+
+    if(role==='host' && msg.type==='host_gap'){
+      session.transcriptWarning=true; await dbMarkTranscriptWarning(session.id);
+      send(ws,{type:'gap_ack'}); return;
     }
 
     // Interim (non-final) snapshot of the sentence currently being spoken —
@@ -1355,8 +1260,9 @@ wss.on('connection', (ws) => {
     // must NOT touch history — only this clears it, both server-side and on
     // every viewer of THIS session (never another session's).
     if (role === 'host' && msg.type === 'host_clear') {
+      await dbSetHistoryBoundary(session.id);
       session.history.length = 0;
-      session.nextId = 1;
+      session.displayAfterSeq=session.nextId-1;
       console.log(`[session ${session.id}] cleared history`);
       broadcastToViewers(session, { type: 'clear' });
       return;
@@ -1372,7 +1278,7 @@ wss.on('connection', (ws) => {
     if (role === 'viewer' && msg.type === 'resync') {
       const after = Number.isFinite(msg.after) ? msg.after : 0;
       const maxId = session.history.length ? session.history[session.history.length - 1].id : 0;
-      if (maxId < after) {
+      if (maxId < after || after < session.displayAfterSeq) {
         send(ws, { type: 'resync', reset: true, utterances: session.history.slice() });
       } else {
         send(ws, { type: 'resync', reset: false, utterances: session.history.filter((u) => u.id > after) });
@@ -1388,39 +1294,25 @@ wss.on('connection', (ws) => {
       send(ws, { type: 'history_batch', utterances: page, hasMore });
       return;
     }
-  });
+  }
 
   ws.on('close', () => {
     const session = sessionId ? sessions.get(sessionId) : null;
     if (!session) return;
     if (role === 'host') {
-      if (session.hostWs === ws) session.hostWs = null;
+      if (session.hostWs !== ws) return;
+      session.hostWs = null;
+      session.audioRelay?.close();
       console.log(`[host] disconnected session=${session.id}`);
-      // A dropped app WS does NOT by itself mean recording stopped — Soniox
-      // audio goes straight from the host's browser to Soniox, independent
-      // of this connection, and host.js's own reconnect (≤10s backoff) will
-      // usually re-register long before this fires. Only treat it as "host
-      // actually left" (closed the tab, lost power) after a real grace
-      // period with no reconnect — see BILLING_DISCONNECT_GRACE_MS.
-      //
-      // SPEC fix ("場次沒結束一直掛 live"): this used to only run — and only
-      // ever stop billing — when session.billingTimer was already set, so a
-      // host who paused (billingTimer null) and then closed the tab left the
-      // session live forever, with no grace timer ever scheduled at all.
-      // Now it always runs for a live/paused session regardless of billing
-      // state, and on timeout also flips the session to 'paused' (not
-      // ended — a network blip or a host who'll be right back shouldn't lose
-      // the join_code) so it stops looking permanently live to viewers and
-      // to the 字幕場次 list. hostDisconnectedAt feeds the separate, much
-      // longer LONG_DISCONNECT_TTL_MS sweep for a session that's truly been
-      // abandoned, not just paused.
+      // Audio has stopped above. Grace time only controls the abandoned-room
+      // status shown to viewers; it never authorizes more audio or charges.
       if (session.status === 'live' || session.status === 'paused') {
         session.hostDisconnectedAt = Date.now();
         clearDisconnectGrace(session); // just in case one was already pending
         session.disconnectGraceTimer = setTimeout(() => {
           session.disconnectGraceTimer = null;
           if (session.hostWs) return; // reconnected in the meantime after all
-          clearBillingTimer(session);
+          stopSessionAudio(session);
           if (session.status === 'live') {
             session.status = 'paused';
             console.log(`[session ${session.id}] host never reconnected within grace period — auto-paused`);
@@ -1430,6 +1322,7 @@ wss.on('connection', (ws) => {
             });
           }
         }, BILLING_DISCONNECT_GRACE_MS);
+        session.disconnectGraceTimer.unref();
       }
     } else if (role === 'viewer') {
       session.viewers.delete(ws);
@@ -1451,13 +1344,41 @@ const heartbeatTimer = setInterval(() => {
 }, HEARTBEAT_INTERVAL);
 
 wss.on('close', () => clearInterval(heartbeatTimer));
+server.on('close', () => {
+  clearInterval(heartbeatTimer);
+  for (const room of sessions.values()) {
+    room.audioRelay?.close();
+    clearDisconnectGrace(room);
+  }
+  for (const ws of wss.clients) ws.terminate();
+  for (const ws of audioWss.clients) ws.terminate();
+  wss.close();
+  audioWss.close();
+});
 
-// Runs schema.sql (idempotent) before accepting requests. A failure here is
-// logged loudly but does not stop the server — live captioning has no DB
-// dependency (see db.js) and must keep working even with Postgres down.
+// Restore durable state before accepting traffic. A database failure stops startup.
 await runMigrations();
+export async function restoreRuntime(){
+  for(const row of (await dbRecoverSessions())||[]){
+    if(sessions.has(row.id))continue;
+    const room=createSession(row.user_id,row);
+    room.history=(await dbGetRecentTranscript(row.id))||[];
+  }
+}
+await restoreRuntime();
+async function maintainRetention(){
+  for(const id of (await dbExpireTranscripts())||[]){
+    const room=sessions.get(id);
+    if(room){sessionsByJoinCode.delete(room.joinCode);sessions.delete(id);}
+  }
+}
+await maintainRetention();
+const retentionTimer=setInterval(()=>maintainRetention().catch(error=>console.error('[retention]',error.message)),60*60_000);
+retentionTimer.unref();
+const stopCleanupWorker=startCleanupWorker();
+server.on('close',()=>{clearInterval(retentionTimer);stopCleanupWorker();});
 
-server.listen(PORT, () => {
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) server.listen(PORT, () => {
   console.log(`Soniox test server running at http://localhost:${PORT}`);
   console.log(`  Host   : http://localhost:${PORT}/host`);
   console.log(`  Viewer : http://localhost:${PORT}/viewer`);
