@@ -11,18 +11,16 @@
 <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
 <link rel="stylesheet" href="/ds.css" />
 <link rel="stylesheet" href="/landing.css" />
+<link rel="stylesheet" href="/site-header.css" />
 </head>
 <body>
-  <nav class="nav">
-    <a href="/" class="nav-brand brand-lockup">
-      <img src="/logo-black.png" alt="Subtii 開字幕" class="brand-logo-img" />
-    </a>
-    <a href="#how">運作方式</a>
-    <a href="#pricing">定價</a>
-    <!-- /host no longer requires login (guest-mode) — the top-right CTA goes
-         straight there instead of forcing Google sign-in up front. -->
-    <a href="/host" class="btn btn-primary nav-cta">進入字幕間</a>
+<header class="site-header">
+  <a href="/" class="site-brand brand-lockup" aria-label="Subtii 開字幕首頁"><img src="/logo-black.png" alt="Subtii 開字幕" class="brand-logo-img" width="957" height="160" /></a>
+  <nav class="site-header-actions" aria-label="主要導覽">
+    <a href="#how" class="site-header-secondary">運作方式</a><a href="#pricing" class="site-header-secondary">定價</a>
+    <a href="/host" class="site-header-primary">進入字幕間</a>
   </nav>
+</header>
 
   <main>
     <section class="hero">
@@ -132,5 +130,6 @@
 
   <script type="module" src="/landing.js"></script>
 <footer style="padding:24px;text-align:center"><a href="/privacy">資料處理與使用說明</a> · <a href="/billing">帳務與儲值紀錄</a></footer>
+<script type="module" src="/site-header.js"></script>
 </body>
 </html>

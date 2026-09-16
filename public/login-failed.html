@@ -1,6 +1,7 @@
 <!doctype html>
 <html lang="zh-Hant">
 <head>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
 <meta charset="utf-8" />
 <title>登入未成功 — Subtii 開字幕</title>
 <link rel="icon" href="/favicon.ico" sizes="any" />
@@ -11,8 +12,16 @@
 <link rel="stylesheet" href="/ds.css" />
 <link rel="stylesheet" href="/landing.css" />
 <link rel="stylesheet" href="/status-page.css" />
+<link rel="stylesheet" href="/site-header.css" />
 </head>
 <body>
+<header class="site-header">
+  <a href="/" class="site-brand brand-lockup" aria-label="Subtii 開字幕首頁"><img src="/logo-black.png" alt="Subtii 開字幕" class="brand-logo-img" width="957" height="160" /></a>
+  <nav class="site-header-actions" aria-label="主要導覽">
+    <a href="/sessions" class="site-header-secondary">字幕場次</a><a href="/billing" class="site-header-secondary">儲值與帳務</a>
+    <a href="/auth/google?returnTo=/sessions" class="site-header-primary" data-header-login>註冊／登入</a><span class="site-account-name" data-header-name data-header-account hidden></span><a href="/auth/logout" data-header-account hidden>登出</a>
+  </nav>
+</header>
   <main class="status-page">
     <span class="brand-mark brand-mark--lg" aria-hidden="true"></span>
     <h1>登入未成功</h1>
@@ -21,5 +30,6 @@
   </main>
 
   <script type="module" src="/login-failed.js"></script>
+<script type="module" src="/site-header.js"></script>
 </body>
 </html>

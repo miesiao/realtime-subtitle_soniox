@@ -11,16 +11,21 @@
 <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
 <link rel="stylesheet" href="/ds.css" />
 <link rel="stylesheet" href="/host.css" />
+<link rel="stylesheet" href="/site-header.css" />
 </head>
 <body class="theme-dark">
   <div id="hostDisconnectBanner" class="alert-banner alert-banner--loud">⚠ 與伺服器斷線！所有觀眾目前收不到新字幕 — 正在自動重新連接…</div>
 
-  <header class="host-topbar">
+<header class="site-header">
+  <a href="/" id="hostLogoLink" class="site-brand brand-lockup" aria-label="Subtii 開字幕首頁"><img src="/logo-black.png" alt="Subtii 開字幕" class="brand-logo-img" width="957" height="160" /></a>
+  <nav class="site-header-actions" aria-label="主要導覽">
+    <a href="/sessions" class="site-header-secondary">字幕場次</a><a href="/billing" class="site-header-secondary">儲值與帳務</a>
+    <a href="/auth/google?returnTo=/sessions" class="site-header-primary" data-header-login>註冊／登入</a><span class="site-account-name" data-header-name data-header-account hidden></span><a href="/auth/logout" data-header-account hidden>登出</a>
+  </nav>
+</header>
+  <div class="host-topbar">
     <div class="host-topbar-row">
-      <a href="/" id="hostLogoLink" class="brand-lockup host-logo-link">
-        <img src="/logo-white.png" alt="Subtii 開字幕" class="brand-logo-img" />
-      </a>
-      <a href="/sessions" class="m text-muted">字幕場次 /</a>
+<a href="/sessions" class="m text-muted">字幕場次 /</a>
       <input id="sessionNameInput" class="input session-name-input" type="text" placeholder="（未命名）" />
       <button id="renameBtn" type="button" class="btn btn-secondary btn-sm">改名</button>
       <span id="renameStatus" class="m text-muted"></span>
@@ -33,9 +38,9 @@
     </div>
     <div class="host-topbar-row host-topbar-row--sub">
       <span id="whoAmI" class="m text-muted">登入狀態確認中…</span>
-      <a href="/auth/logout">登出</a>
+
     </div>
-  </header>
+  </div>
 
   <div id="creditsPausedBanner" class="alert-banner alert-banner--loud" hidden>⚠ 點數已用盡，本場已自動暫停（join code 與觀眾連線不受影響）。請儲值後按 Start 繼續本場。</div>
   <div id="lowBalanceBanner" class="alert-banner alert-banner--low" hidden>
@@ -211,5 +216,6 @@
 
   <script type="module" src="/host.js"></script>
 <footer style="padding:24px;text-align:center"><a href="/privacy">資料處理與使用說明</a> · <a href="/billing">帳務與儲值紀錄</a></footer>
+<script type="module" src="/site-header.js"></script>
 </body>
 </html>
