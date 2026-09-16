@@ -39,7 +39,11 @@ function showSessionOverlay({ tag, tagClass = 'tag-accent', title, subtitle, bod
   head.className = 'overlay-head';
   // A viewer's logo just goes home directly, no confirm — unlike host's (see
   // host.js), leaving this page mid-session costs the viewer nothing.
-  head.innerHTML = '<a href="/" class="brand-lockup"><span class="brand-mark brand-mark--sm" aria-hidden="true"></span><span class="brand-name">Subtii</span></a>';
+  // #sessionOverlay always renders on the light-theme background token (it
+  // sits outside #app, so #app's own dark-mode toggle never reaches it —
+  // see viewer2.css) — logo-black.png is the correct ink color regardless
+  // of which theme the viewer picked for the caption panes themselves.
+  head.innerHTML = '<a href="/" class="brand-lockup"><img src="/logo-black.png" alt="Subtii 開字幕" class="brand-logo-img" /></a>';
   if (joinCode) {
     const code = document.createElement('span');
     code.className = 'm text-muted overlay-code';

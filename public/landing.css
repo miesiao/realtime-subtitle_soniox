@@ -52,9 +52,9 @@ main { max-width: 1180px; margin: 0 auto; padding: 0 var(--space-4); }
 .pricing-formula p { font-size: 14px; color: color-mix(in srgb, var(--color-text) 75%, transparent); margin: var(--space-2) 0 0; }
 .pricing-table { flex: 1; min-width: 240px; }
 
-.closer { background: var(--color-accent); color: var(--color-bg); padding: var(--space-8) var(--space-4); margin: 0 calc(-1 * var(--space-4)); }
-.closer h2 { font-size: 44px; max-width: 20em; margin: 0; }
-.closer-row { display: flex; align-items: center; gap: var(--space-4); margin-top: var(--space-6); flex-wrap: wrap; }
+.closer { background: var(--color-accent); color: var(--color-bg); padding: var(--space-8) var(--space-4); margin: 0 calc(-1 * var(--space-4)); text-align: center; }
+.closer h2 { font-size: 44px; max-width: 20em; margin: 0 auto; }
+.closer-row { display: flex; align-items: center; justify-content: center; gap: var(--space-4); margin-top: var(--space-6); flex-wrap: wrap; }
 .closer-btn { background: var(--color-bg); color: var(--color-text); font-size: 16px; padding: var(--space-3) var(--space-6); }
 .closer-note { font-size: 14px; font-weight: 600; background: var(--color-bg); color: var(--color-text); padding: 6px 12px; }
 

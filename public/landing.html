@@ -15,13 +15,13 @@
 <body>
   <nav class="nav">
     <a href="/" class="nav-brand brand-lockup">
-      <span class="brand-mark" aria-hidden="true"></span>
-      <span class="brand-name">Subt<span class="brand-name-accent">ii</span></span>
-      <span class="brand-suffix">開字幕</span>
+      <img src="/logo-black.png" alt="Subtii 開字幕" class="brand-logo-img" />
     </a>
     <a href="#how">運作方式</a>
     <a href="#pricing">定價</a>
-    <a href="/auth/google?returnTo=/sessions" class="btn btn-primary nav-cta">使用 Google 登入</a>
+    <!-- /host no longer requires login (guest-mode) — the top-right CTA goes
+         straight there instead of forcing Google sign-in up front. -->
+    <a href="/host" class="btn btn-primary nav-cta">進入字幕間</a>
   </nav>
 
   <main>
@@ -125,7 +125,7 @@
     <section class="closer">
       <h2>下一場活動，讓每個人都聽得懂。</h2>
       <div class="closer-row">
-        <a href="/auth/google?returnTo=/sessions" class="btn closer-btn">使用 Google 登入</a>
+        <a href="/host" class="btn closer-btn">立即試用字幕間</a>
         <span class="closer-note">加入即贈 50 點，先試一場再儲值。</span>
       </div>
     </section>

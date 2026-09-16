@@ -220,10 +220,11 @@ textarea.input { min-height: 70px; resize: vertical; }
   .pricing-tiers { grid-template-columns: 1fr; }
 }
 
-.brand-lockup { display: inline-flex; align-items: baseline; gap: 8px; }
-.brand-lockup .brand-name { font-weight: 800; }
-/* Reference lockup (temp/1.png, temp/2.png): "開字幕" reads at the same bold
-   weight and near-black ink as "Subtii", not as a smaller muted caption —
-   matched here instead of the old lighter/smaller treatment. */
-.brand-lockup .brand-suffix { font-weight: 800; font-size: 0.85em; color: inherit; }
-.brand-lockup .brand-name-accent { color: var(--color-accent); }
+/* Logo lockup — a single <img> now (the real "Subtii 開字幕" artwork from
+   the /logo source folder, not a CSS-drawn approximation): logo-black.png
+   (black text/mark ink) on a light-background page, logo-white.png (white
+   text) on a dark one. Both files are pre-cropped to their own content bbox
+   with real alpha transparency — pick whichever file's ink color matches
+   the page background, not the other way around. */
+.brand-lockup { display: inline-flex; align-items: center; }
+.brand-logo-img { height: 26px; width: auto; display: block; }
