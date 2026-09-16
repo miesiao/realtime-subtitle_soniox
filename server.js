@@ -261,17 +261,13 @@ export const sessions = new Map();           // id -> session
 const sessionsByJoinCode = new Map(); // joinCode -> id
 
 const JOIN_CODE_ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789'; // no 0/o/1/i/l — avoids read-aloud ambiguity
-const JOIN_CODE_SEGMENTS = [3, 4, 3];
-
-function randomSegment(len) {
-  const bytes = crypto.randomBytes(len);
-  let s = '';
-  for (let i = 0; i < len; i++) s += JOIN_CODE_ALPHABET[bytes[i] % JOIN_CODE_ALPHABET.length];
-  return s;
-}
+const JOIN_CODE_LENGTH = 6;
 
 function generateJoinCode() {
-  return JOIN_CODE_SEGMENTS.map(randomSegment).join('-');
+  const bytes = crypto.randomBytes(JOIN_CODE_LENGTH);
+  let s = '';
+  for (let i = 0; i < JOIN_CODE_LENGTH; i++) s += JOIN_CODE_ALPHABET[bytes[i] % JOIN_CODE_ALPHABET.length];
+  return s;
 }
 
 function createUniqueJoinCode() {

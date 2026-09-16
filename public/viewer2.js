@@ -21,7 +21,7 @@ const zoomLevelEl = document.getElementById('zoomLevel');
 const themeToggleBtn = document.getElementById('themeToggleBtn');
 
 // --- Session join_code (SPEC §3): the capability-based ticket from the QR
-// link/URL — "?code=xxx-xxxx-xxx". No code, no session; the overlay covers
+// link/URL — "?code=xxxxxx". No code, no session; the overlay covers
 // the feed the whole time and the WS layer never even connects.
 const joinCode = new URLSearchParams(location.search).get('code');
 
@@ -335,6 +335,7 @@ let reconnectTimer = null;
 let reconnectAttempt = 0;
 let wasDisconnected = false; // only show the "reconnected" banner after a real disconnect
 let bannerFadeTimer = null;
+let hasGoneLive = false; // once true, a later 'paused' status stays on the transcript page instead of the full overlay
 
 function nextReconnectDelay() {
   const delay = Math.min(RECONNECT_BASE_MS * (2 ** reconnectAttempt), RECONNECT_MAX_MS);
@@ -362,6 +363,25 @@ function showReconnectedBanner() {
       connBannerEl.textContent = '';
     }, 500);
   }, 2000);
+}
+
+// Server-driven auto-pause once captions have already started (SPEC fix
+// "場次沒結束一直掛 live"): same low-key treatment as a socket reconnect —
+// the transcript already on screen stays put, this is routine not an
+// emergency. Persistent (no fade) until session_status reports 'live' again.
+let pausedBannerShown = false;
+function showPausedBanner() {
+  clearTimeout(bannerFadeTimer);
+  bannerFadeTimer = null;
+  connBannerEl.className = 'disconnected';
+  connBannerEl.textContent = '主辦單位暫時離線，字幕暫停中…';
+  pausedBannerShown = true;
+}
+function hidePausedBanner() {
+  if (!pausedBannerShown) return;
+  connBannerEl.className = '';
+  connBannerEl.textContent = '';
+  pausedBannerShown = false;
 }
 
 function connect() {
@@ -430,6 +450,8 @@ function connect() {
     if (msg.type === 'session_status') {
       setTranslateMode(msg.targetLangs);
       if (msg.status === 'live') {
+        hasGoneLive = true;
+        hidePausedBanner();
         hideSessionOverlay();
       } else if (msg.status === 'created') {
         showSessionOverlay({
@@ -440,15 +462,24 @@ function connect() {
       } else if (msg.status === 'paused') {
         // Server-driven auto-pause (SPEC fix "場次沒結束一直掛 live"): the
         // host's connection dropped and didn't come back in time — distinct
-        // from 'ended', this is expected to resume, so it reads as a
-        // temporary lull rather than a hard stop.
-        showSessionOverlay({
-          tag: '暫停中',
-          tagClass: 'tag-neutral',
-          title: msg.name || '這場字幕',
-          body: '主辦單位暫時離線，字幕先暫停。請留在這個畫面，恢復後會自動繼續。',
-        });
+        // from 'ended', this is expected to resume. If captions had already
+        // started, stay on the transcript page with a low-key banner (same
+        // treatment as a socket reconnect) instead of covering it with the
+        // "not started yet" overlay — the transcript already on screen is
+        // still worth reading. Only fall back to the full overlay if the
+        // session never actually went live yet.
+        if (hasGoneLive) {
+          showPausedBanner();
+        } else {
+          showSessionOverlay({
+            tag: '暫停中',
+            tagClass: 'tag-neutral',
+            title: msg.name || '這場字幕',
+            body: '主辦單位暫時離線，字幕先暫停。請留在這個畫面，恢復後會自動繼續。',
+          });
+        }
       } else if (msg.status === 'ended') {
+        hidePausedBanner();
         showSessionOverlay({
           tag: '已結束',
           tagClass: 'tag-neutral',
