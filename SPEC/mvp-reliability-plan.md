@@ -14,7 +14,7 @@
 - 整理工作、分段結果、租約與來源版本持久化。手動重試沿用已完成分段；重啟可接續工作，晚到字幕會使舊工作失效，刪除後舊工作不能重新寫入。
 - 刪除場次移除文字及整理資料，保留扣款原始場次編號。人工入帳和調帳皆有唯一編號、操作者、原因與交易紀錄。
 - `/billing` 提供儲值訂單、末五碼回填、最近 100 筆訂單與 200 筆點數紀錄。
-- `/privacy` 說明 Google、Soniox、Anthropic、Railway 的用途，AI 誤差、文字保存 30 天、刪除範圍與客服。SUPPORT_EMAIL 可設定，預設沿用既有聯絡信箱 hmyculture@gmail.com。
+- `/privacy` 說明 Google、Soniox、Anthropic、Railway 的用途，AI 誤差、文字保存 30 天、刪除範圍與客服。SUPPORT_EMAIL 可設定，預設沿用既有聯絡信箱 subtiitw@gmail.com。
 - 首頁移除紀要、三種譯文的宣稱，定位為即時字幕、單一翻譯及整理逐字稿。
 
 ## 資料遷移與保留

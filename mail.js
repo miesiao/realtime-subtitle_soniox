@@ -24,7 +24,7 @@ if (SMTP_CONFIGURED) {
   );
 }
 
-const NOTIFY_TO = process.env.ORDER_NOTIFY_EMAIL || 'hmyculture@gmail.com';
+const NOTIFY_TO = process.env.ORDER_NOTIFY_EMAIL || 'subtiitw@gmail.com';
 
 // Called once, right when the host fills in the transfer's last five digits
 // (SPEC step 4) — everything a human needs to go match this against the

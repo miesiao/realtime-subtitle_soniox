@@ -482,7 +482,7 @@ app.post('/api/sessions', requireLoginApi, async (req, res) => {
     sessions.delete(session.id); sessionsByJoinCode.delete(session.joinCode);
     return res.status(503).json({error:'場次保存失敗，請稍後重試'});
   }
-  const viewerUrl = `${getOrigin(req)}/viewer2?code=${session.joinCode}`;
+  const viewerUrl = `${getOrigin(req)}/live?code=${session.joinCode}`;
   let qrDataUrl = null;
   try {
     qrDataUrl = await QRCode.toDataURL(viewerUrl, { margin: 1, width: 320 });
@@ -534,7 +534,7 @@ app.get('/api/sessions/:id', requireLoginApi, async (req, res) => {
     res.status(404).json({ error: 'session_not_found' });
     return;
   }
-  const viewerUrl = `${getOrigin(req)}/viewer2?code=${row.join_code}`;
+  const viewerUrl = `${getOrigin(req)}/live?code=${row.join_code}`;
   let qrDataUrl = null;
   try {
     qrDataUrl = await QRCode.toDataURL(viewerUrl, { margin: 1, width: 320 });
@@ -825,7 +825,7 @@ app.get('/api/sessions/:id/transcript/raw',requireLoginApi,async(req,res)=>{
   res.send((row.transcript_warning?'注意：本場曾發生字幕保存或補送異常，原稿可能不完整。\n\n':'')+lines.map(line=>line.original_text).join('\n'));
 });
 app.get('/api/billing',requireLoginApi,async(req,res)=>res.json(await dbGetBillingHistory(req.user.id)));
-app.get('/api/service-info',(req,res)=>res.json({supportEmail:process.env.SUPPORT_EMAIL||'hmyculture@gmail.com',topupResponse:'下一個工作日內確認入帳',retentionDays:30}));
+app.get('/api/service-info',(req,res)=>res.json({supportEmail:process.env.SUPPORT_EMAIL||'subtiitw@gmail.com',topupResponse:'下一個工作日內確認入帳',retentionDays:30}));
 app.get('/billing',requireLoginPage,(req,res)=>serveFile(res,path.join(PUBLIC_DIR,'billing.html')));
 app.get('/privacy',(req,res)=>serveFile(res,path.join(PUBLIC_DIR,'privacy.html')));
 
@@ -882,8 +882,7 @@ app.get('/vendor/opencc-cn2t.mjs', (req, res) => serveFile(res, VENDOR_OPENCC));
 // Public marketing landing page ("隨時有字幕") — the actual entry point now.
 // It carries its own "登入 / 註冊" button straight to /auth/google, so a
 // signed-out visitor no longer has to bounce through /host first to find
-// login. The old single-page Soniox test page moved to /single (no route
-// change to that page itself — still index.html).
+// login. The legacy /single recorder is retired and redirects to sessions.
 app.get('/', (req, res) => serveFile(res, path.join(PUBLIC_DIR, 'landing.html')));
 app.get(['/single', '/index.html'], (req, res) => res.redirect('/sessions'));
 app.get('/app.js', (req, res) => res.status(410).send('Legacy recording entry retired'));
@@ -909,8 +908,12 @@ app.get('/host', (req, res) => {
 app.get('/sessions', requireLoginPage, (req, res) => serveFile(res, path.join(PUBLIC_DIR, 'sessions.html')));
 
 // Viewer flow stays completely open — no login, ever (SPEC §3a "不要碰的").
-app.get('/viewer', (req, res) => serveFile(res, path.join(PUBLIC_DIR, 'viewer.html')));
-app.get('/viewer2', (req, res) => serveFile(res, path.join(PUBLIC_DIR, 'viewer2.html')));
+app.get('/live', (req, res) => serveFile(res, path.join(PUBLIC_DIR, 'viewer2.html')));
+// Preserve the room code in previously shared links and QR codes.
+app.get(['/viewer', '/viewer.html', '/viewer2', '/viewer2.html'], (req, res) => {
+  const query = new URL(req.originalUrl, 'http://localhost').search;
+  res.redirect(308, '/live' + query);
+});
 
 // index:false — otherwise express.static would keep auto-serving index.html
 // for GET / and silently shadow the landing page route above.
@@ -1381,6 +1384,5 @@ server.on('close',()=>{clearInterval(retentionTimer);stopCleanupWorker();});
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) server.listen(PORT, () => {
   console.log(`Soniox test server running at http://localhost:${PORT}`);
   console.log(`  Host   : http://localhost:${PORT}/host`);
-  console.log(`  Viewer : http://localhost:${PORT}/viewer`);
-  console.log(`  Viewer2: http://localhost:${PORT}/viewer2`);
+  console.log(`  Live   : http://localhost:${PORT}/live`);
 });
