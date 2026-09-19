@@ -14,8 +14,10 @@ process.env.SESSION_SECRET = 'test-cookie-secret';
 process.env.NODE_ENV = 'test';
 process.env.OPEN_SIGNUP = 'false';
 process.env.LOGIN_ALLOWLIST = 'tester@example.invalid';
+process.env.TOUR_EARLY_ACCESS_EMAILS = 'tester@example.invalid';
 process.env.GOOGLE_LOGIN_CLIENT_ID = '';
 process.env.GOOGLE_LOGIN_CLIENT_SECRET = '';
+const tourRows=new Map();
 const transcriptRows=new Map();
 const meters=new Map();
 const rows = new Map();
@@ -30,7 +32,16 @@ Object.assign(exports, {
   dbGetBillingHistory: async()=>({orders:[],entries:[]}),
   dbGetAudioMeter: async (id,rate) => meters.get(id+':'+rate)||{processedMs:0,paidMinutes:0},
   dbSaveAudioMeter: async (id,rate,ms) => {const m=meters.get(id+':'+rate);if(m)m.processedMs=ms.processedMs;},
-  dbGetUserById: async (id) => balances.has(id) ? { id, name: id } : null,
+  dbGetUserById: async (id) => balances.has(id) ? { id, name: id, email:id==='user-a'?'tester@example.invalid':'other@example.invalid' } : null,
+  dbCreateTourGroup: async({id,userId,name,code})=>{const row={id,user_id:userId,name,code,status:'open',active_session_id:null,created_at:new Date()};tourRows.set(id,row);return row;},
+  dbGetTourGroupsByUser: async(userId)=>[...tourRows.values()].filter(x=>x.user_id===userId),
+  dbGetOpenTourGroups: async()=>[],
+  dbGetTourGroupsForRouting: async()=>[],
+  dbGetTourGroup: async(id,userId)=>tourRows.get(id)?.user_id===userId?tourRows.get(id):null,
+  dbCreateTourSession: async({id,userId,groupId,joinCode,name})=>{const group=tourRows.get(groupId);if(!group||group.user_id!==userId)throw Error('tour_not_found');if(group.active_session_id)throw Error('tour_session_active');const row={id,user_id:userId,join_code:joinCode,name,status:'created',tour_group_id:groupId,next_seq:1,created_at:new Date()};rows.set(id,row);group.active_session_id=id;return row;},
+  dbRotateTourGroup: async(id,userId,code)=>{const group=tourRows.get(id);if(!group||group.user_id!==userId)return null;if(group.active_session_id)throw Error('tour_session_active');group.code=code;return group;},
+  dbCloseTourGroup: async(id,userId)=>{const group=tourRows.get(id);if(!group||group.user_id!==userId)return null;if(group.active_session_id)throw Error('tour_session_active');group.status='closed';return group;},
+  dbMarkSessionEnded: async(id)=>{const row=rows.get(id);if(row){row.status='ended';row.ended_at=new Date();if(row.tour_group_id)tourRows.get(row.tour_group_id).active_session_id=null;}},
   dbGetUserCredits: async (id) => balances.get(id),
   dbInsertSession: async (row) => rows.set(row.id, { ...row, user_id: row.userId, join_code: row.joinCode, status: 'created' }),
   dbGetSessionOwner: async (id) => rows.get(id),
@@ -172,3 +183,48 @@ test('guest host page has no password prompt; homepage promises only implemented
 });
 
 test('persisted transcript ACK replay is deduplicated; raw download is owner-only',async()=>{const r=await room();const {ws}=await host(r.id);sessions.get(r.id).status='paused';const data={type:'host_utterance',clientMessageId:'replay-test',ts:Date.now(),original:'保留最後一句',translations:{en:'tail'}};for(let i=0;i<2;i++){const ack=message(ws,m=>m.type==='utterance_ack');ws.send(JSON.stringify(data));await ack;}assert.equal(transcriptRows.get(r.id).length,1);assert.equal(sessions.get(r.id).history.length,1);const raw=await fetch(base+'/api/sessions/'+r.id+'/transcript/raw',{headers:{Cookie:cookies['user-a']}});assert.equal(raw.status,200);assert.match(await raw.text(),/保留最後一句/);const foreign=await fetch(base+'/api/sessions/'+r.id+'/transcript/raw',{headers:{Cookie:cookies['user-b']}});assert.equal(foreign.status,403);});
+
+test('tour early access keeps one guest link across two rooms and isolates each transcript',async()=>{
+  const headers={Cookie:cookies['user-a'],'Content-Type':'application/json'};
+  const guestCreate=await fetch(base+'/api/tours',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:'旅行團'})});
+  assert.equal(guestCreate.status,401);
+  const denied=await fetch(base+'/api/tours',{method:'POST',headers:{Cookie:cookies['user-b'],'Content-Type':'application/json'},body:JSON.stringify({name:'別人的團'})});
+  assert.equal(denied.status,403);
+  const created=await fetch(base+'/api/tours',{method:'POST',headers,body:JSON.stringify({name:'五日旅行'})});
+  assert.equal(created.status,201);const group=await created.json();assert.equal(group.code.length,8);assert.match(group.viewerUrl,/\/live\?code=/);
+  const viewer=socket('/',null);await once(viewer,'open');
+  const waiting=message(viewer,m=>m.type==='session_status'&&m.status==='waiting');
+  viewer.send(JSON.stringify({type:'register',role:'viewer',joinCode:group.code}));await waiting;
+  const firstSwitch=message(viewer,m=>m.type==='viewer_registered'&&Boolean(m.sessionId));
+  const firstResponse=await fetch(base+'/api/tours/'+group.id+'/sessions',{method:'POST',headers,body:JSON.stringify({name:'第一天上午'})});
+  assert.equal(firstResponse.status,201);const first=await firstResponse.json();assert.equal((await firstSwitch).sessionId,first.id);
+  const hostInfo=await fetch(base+'/api/sessions/'+first.id,{headers:{Cookie:cookies['user-a']}});
+  assert.equal((await hostInfo.json()).viewerUrl,group.viewerUrl);
+  const repeat=await fetch(base+'/api/tours/'+group.id+'/sessions',{method:'POST',headers,body:JSON.stringify({name:'不應重複'})});assert.equal(repeat.status,409);
+  const foreignQr=await fetch(base+'/api/tours/'+group.id+'/qr',{headers:{Cookie:cookies['user-b']}});assert.equal(foreignQr.status,404);
+  sessions.get(first.id).status='live';const firstHost=await host(first.id);
+  const firstCaption=message(viewer,m=>m.type==='utterance'&&m.original==='第一場');
+  firstHost.ws.send(JSON.stringify({type:'host_utterance',clientMessageId:'first',ts:Date.now(),original:'第一場',translations:{}}));await firstCaption;
+  const backToWaiting=message(viewer,m=>m.type==='session_status'&&m.status==='waiting');
+  const ended=await fetch(base+'/api/sessions/'+first.id+'/end',{method:'POST',headers});assert.equal(ended.status,200);await backToWaiting;
+  const secondSwitch=message(viewer,m=>m.type==='viewer_registered'&&m.sessionId&&m.sessionId!==first.id);
+  const secondResponse=await fetch(base+'/api/tours/'+group.id+'/sessions',{method:'POST',headers,body:JSON.stringify({name:'第二天下午'})});
+  assert.equal(secondResponse.status,201);const second=await secondResponse.json();assert.equal((await secondSwitch).sessionId,second.id);
+  assert.equal(second.viewerUrl,group.viewerUrl);
+  sessions.get(second.id).status='live';const secondHost=await host(second.id);
+  const secondCaption=message(viewer,m=>m.type==='utterance'&&m.original==='第二場');
+  secondHost.ws.send(JSON.stringify({type:'host_utterance',clientMessageId:'second',ts:Date.now(),original:'第二場',translations:{}}));await secondCaption;
+  assert.deepEqual(transcriptRows.get(first.id).map(x=>x.original_text),['第一場']);
+  assert.deepEqual(transcriptRows.get(second.id).map(x=>x.original_text),['第二場']);
+  const secondEnd=await fetch(base+'/api/sessions/'+second.id+'/end',{method:'POST',headers});assert.equal(secondEnd.status,200);
+  const rotatedResponse=await fetch(base+'/api/tours/'+group.id+'/rotate',{method:'POST',headers});assert.equal(rotatedResponse.status,200);
+  const rotated=await rotatedResponse.json();assert.notEqual(rotated.code,group.code);
+  const expiredViewer=socket('/',null);await once(expiredViewer,'open');
+  const invalid=message(expiredViewer,m=>m.type==='register_error');expiredViewer.send(JSON.stringify({type:'register',role:'viewer',joinCode:group.code}));assert.equal((await invalid).reason,'invalid_code');
+  const newViewer=socket('/',null);await once(newViewer,'open');
+  const newWaiting=message(newViewer,m=>m.type==='session_status');newViewer.send(JSON.stringify({type:'register',role:'viewer',joinCode:rotated.code}));assert.equal((await newWaiting).status,'waiting');
+  const closed=await fetch(base+'/api/tours/'+group.id+'/close',{method:'POST',headers});assert.equal(closed.status,200);
+  const lateViewer=socket('/',null);await once(lateViewer,'open');
+  const closedState=message(lateViewer,m=>m.type==='session_status');lateViewer.send(JSON.stringify({type:'register',role:'viewer',joinCode:rotated.code}));
+  assert.equal((await closedState).status,'closed');
+});

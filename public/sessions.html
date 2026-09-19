@@ -35,6 +35,16 @@
       </button>
     </div>
 
+    <section id="tourSection" class="tour-section" hidden>
+      <div class="list-toolbar"><h2>旅行團固定入口</h2><span class="text-muted">同一連結可跨天、多場使用</span></div>
+      <form id="newTourForm" class="tour-create">
+        <label for="tourName">團名</label>
+        <input id="tourName" class="input" type="text" maxlength="80" required placeholder="例如：九州五日團" />
+        <button type="submit" class="btn btn-primary">建立固定入口</button>
+      </form>
+      <p id="tourStatus" role="status"></p>
+      <div id="tourList" class="tour-list"></div>
+    </section>
     <section class="list-section">
       <div class="list-toolbar">
         <span class="m text-muted list-count">場次清單</span>
@@ -78,6 +88,7 @@
   </template>
 
   <script type="module" src="/sessions.js"></script>
+  <script type="module" src="/tours.js"></script>
 <footer style="padding:24px;text-align:center"><a href="/privacy">資料處理與使用說明</a> · <a href="/billing">帳務與儲值紀錄</a></footer>
 <script type="module" src="/site-header.js"></script>
 </body>

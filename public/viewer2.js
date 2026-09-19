@@ -335,6 +335,7 @@ let reconnectTimer = null;
 let reconnectAttempt = 0;
 let wasDisconnected = false; // only show the "reconnected" banner after a real disconnect
 let bannerFadeTimer = null;
+let activeSessionId = null;
 let hasGoneLive = false; // once true, a later 'paused' status stays on the transcript page instead of the full overlay
 
 function nextReconnectDelay() {
@@ -392,13 +393,8 @@ function connect() {
   ws.onopen = () => {
     reconnectAttempt = 0;
     ws.send(JSON.stringify({ type: 'register', role: 'viewer', joinCode }));
-    // A reconnect (as opposed to first-ever load): ask precisely for
-    // whatever landed while we were gone instead of trusting the
-    // automatic `backfill`, whose fixed-size window may not reach far
-    // enough back — see applyResync/the 'resync' handler below.
-    if (lastSeenId !== null) {
-      ws.send(JSON.stringify({ type: 'resync', after: lastSeenId }));
-    }
+    // Wait for the server to identify the current room first. A tour link
+    // may now point at a different session with its own transcript sequence.
     connStatusEl.textContent = '已連線';
     connStatusEl.className = 'connected';
     if (wasDisconnected) showReconnectedBanner();
@@ -417,6 +413,18 @@ function connect() {
   ws.onmessage = ({ data }) => {
     let msg;
     try { msg = JSON.parse(data); } catch { return; }
+    if (msg.type === 'viewer_registered') {
+      const nextId = msg.sessionId || null;
+      if (activeSessionId !== nextId) {
+        resetTranscript();
+        hidePausedBanner();
+        hasGoneLive = false;
+        activeSessionId = nextId;
+      } else if (nextId && lastSeenId !== null) {
+        ws.send(JSON.stringify({ type: 'resync', after: lastSeenId, sessionId: nextId }));
+      }
+      return;
+    }
     if (msg.type === 'backfill') {
       // Only the very first connection uses this as-is. On a reconnect
       // (lastSeenId already set) the resync response above is the
@@ -449,7 +457,13 @@ function connect() {
     }
     if (msg.type === 'session_status') {
       setTranslateMode(msg.targetLangs);
-      if (msg.status === 'live') {
+      if (msg.status === 'waiting') {
+        hidePausedBanner();
+        showSessionOverlay({tag:'等待下一場',title:msg.name||'旅行團字幕',body:'主辦單位開啟下一場時，這裡會自動顯示字幕。請保留這個連結。'});
+      } else if (msg.status === 'closed') {
+        hidePausedBanner();
+        showSessionOverlay({tag:'已關閉',tagClass:'tag-neutral',title:msg.name||'旅行團字幕',body:'這個固定入口已關閉。請向主辦單位索取新的連結。'});
+      } else if (msg.status === 'live') {
         hasGoneLive = true;
         hidePausedBanner();
         hideSessionOverlay();

@@ -179,6 +179,7 @@ function renderSessionRow(session) {
         await apiFetchJson(`/api/sessions/${session.id}/end`, { method: 'POST' });
         await loadSessions();
         applyFilter();
+        window.dispatchEvent(new Event('tours-changed'));
       } catch (err) {
         if (err.message === 'login_required') return;
         console.error('End session failed:', err);

@@ -14,8 +14,10 @@ process.env.SESSION_SECRET = 'test-cookie-secret';
 process.env.NODE_ENV = 'test';
 process.env.OPEN_SIGNUP = 'false';
 process.env.LOGIN_ALLOWLIST = 'tester@example.invalid';
+process.env.TOUR_EARLY_ACCESS_EMAILS = 'tester@example.invalid';
 process.env.GOOGLE_LOGIN_CLIENT_ID = '';
 process.env.GOOGLE_LOGIN_CLIENT_SECRET = '';
+const tourRows=new Map();
 const transcriptRows=new Map();
 const meters=new Map();
 const rows = new Map();
@@ -30,7 +32,16 @@ Object.assign(exports, {
   dbGetBillingHistory: async()=>({orders:[],entries:[]}),
   dbGetAudioMeter: async (id,rate) => meters.get(id+':'+rate)||{processedMs:0,paidMinutes:0},
   dbSaveAudioMeter: async (id,rate,ms) => {const m=meters.get(id+':'+rate);if(m)m.processedMs=ms.processedMs;},
-  dbGetUserById: async (id) => balances.has(id) ? { id, name: id } : null,
+  dbGetUserById: async (id) => balances.has(id) ? { id, name: id, email:id==='user-a'?'tester@example.invalid':'other@example.invalid' } : null,
+  dbCreateTourGroup: async({id,userId,name,code})=>{const row={id,user_id:userId,name,code,status:'open',active_session_id:null,created_at:new Date()};tourRows.set(id,row);return row;},
+  dbGetTourGroupsByUser: async(userId)=>[...tourRows.values()].filter(x=>x.user_id===userId),
+  dbGetOpenTourGroups: async()=>[],
+  dbGetTourGroupsForRouting: async()=>[],
+  dbGetTourGroup: async(id,userId)=>tourRows.get(id)?.user_id===userId?tourRows.get(id):null,
+  dbCreateTourSession: async({id,userId,groupId,joinCode,name})=>{const group=tourRows.get(groupId);if(!group||group.user_id!==userId)throw Error('tour_not_found');if(group.active_session_id)throw Error('tour_session_active');const row={id,user_id:userId,join_code:joinCode,name,status:'created',tour_group_id:groupId,next_seq:1,created_at:new Date()};rows.set(id,row);group.active_session_id=id;return row;},
+  dbRotateTourGroup: async(id,userId,code)=>{const group=tourRows.get(id);if(!group||group.user_id!==userId)return null;if(group.active_session_id)throw Error('tour_session_active');group.code=code;return group;},
+  dbCloseTourGroup: async(id,userId)=>{const group=tourRows.get(id);if(!group||group.user_id!==userId)return null;if(group.active_session_id)throw Error('tour_session_active');group.status='closed';return group;},
+  dbMarkSessionEnded: async(id)=>{const row=rows.get(id);if(row){row.status='ended';row.ended_at=new Date();if(row.tour_group_id)tourRows.get(row.tour_group_id).active_session_id=null;}},
   dbGetUserCredits: async (id) => balances.get(id),
   dbInsertSession: async (row) => rows.set(row.id, { ...row, user_id: row.userId, join_code: row.joinCode, status: 'created' }),
   dbGetSessionOwner: async (id) => rows.get(id),
@@ -131,6 +142,45 @@ try {
   assert.equal(await boxPage.locator('#entries table').count(),1);
   await boxPage.screenshot({path:'.gstack/qa-reports/screenshots/mvp-billing.png'});
   await boxPage.close();
+  const toursPage=await live.newPage();toursPage.on('pageerror',error=>errors.push(error.message));
+  await toursPage.goto(base+'/sessions');
+  await toursPage.locator('#tourSection').waitFor({state:'visible'});
+  await toursPage.locator('#tourName').fill('五日旅行團');
+  await toursPage.locator('#newTourForm button').click();
+  await toursPage.locator('.tour-card').waitFor();
+  const group=await toursPage.evaluate(()=>{const card=document.querySelector('.tour-card');return {link:card.querySelector('.tour-share a').href,code:card.querySelector('.tour-share p').textContent.split('：')[1]};});
+  assert.equal(group.code.length,8);
+  await toursPage.screenshot({path:'.gstack/qa-reports/screenshots/mvp-tour-entry.png'});
+  await toursPage.setViewportSize({width:390,height:844});
+  assert.equal(await toursPage.locator('.tour-card').isVisible(),true);
+  assert.equal(await toursPage.locator('.tour-session-form button').isVisible(),true);
+  await toursPage.screenshot({path:'.gstack/qa-reports/screenshots/mvp-tour-mobile.png'});
+  await toursPage.setViewportSize({width:1280,height:720});
+  const audienceContext=await browser.newContext();const audience=await audienceContext.newPage();audience.on('pageerror',error=>errors.push(error.message));
+  await audience.goto(group.link);
+  await audience.waitForFunction(()=>document.querySelector('#sessionOverlay').textContent.includes('等待下一場'));
+  await toursPage.locator('.tour-session-form input').fill('第一天上午');
+  await toursPage.locator('.tour-session-form button').click();
+  await toursPage.waitForURL('**/host?id=*');
+  await toursPage.waitForFunction(()=>document.querySelector('#viewerLink').href.includes('/live?code='));
+  assert.equal(await toursPage.locator('#viewerLink').getAttribute('href'),group.link);
+  assert.equal(await toursPage.locator('#joinCode').textContent(),group.code);
+  await toursPage.waitForFunction(()=>document.querySelector('#wsStatus').textContent.includes('connected'));
+  await toursPage.locator('#startBtn').click();
+  await toursPage.waitForFunction(()=>document.querySelector('#status').textContent==='recording');
+  await audience.waitForFunction(()=>document.querySelector('#sessionOverlay').hidden);
+  toursPage.once('dialog',dialog=>dialog.accept());
+  await toursPage.locator('#endSessionBtn').click();
+  await toursPage.waitForFunction(()=>document.querySelector('#status').textContent.includes('已結束'));
+  await audience.waitForFunction(()=>document.querySelector('#sessionOverlay').textContent.includes('等待下一場'));
+  const activeGroup=[...tourRows.values()][0];
+  const second=await live.request.post(base+'/api/tours/'+activeGroup.id+'/sessions',{data:{name:'第二天下午'}});
+  assert.equal(second.status(),201);
+  assert.equal((await second.json()).viewerUrl,group.link);
+  await audience.waitForFunction(()=>document.querySelector('#sessionOverlay').textContent.includes('第二天下午'));
+  assert.deepEqual(errors,[]);
+  console.log('PASS browser tour: owner creates one QR, audience waits/live/waits/new room with same link');
+  await audienceContext.close();await toursPage.close();
   await live.close();
 } finally {
   await browser.close(); server.closeAllConnections();

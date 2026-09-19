@@ -213,6 +213,7 @@ export async function dbMarkSessionLive(id) {
 export async function dbMarkSessionEnded(id) {
   return transaction(async client=>{
     const {rows:[row]}=await client.query("UPDATE sessions SET status='ended', ended_at=COALESCE(ended_at,now()), expires_at=COALESCE(expires_at,now()+interval '30 days'), processing_status=COALESCE(processing_status,'queued') WHERE id=$1 RETURNING *",[id]);
+    if(row?.tour_group_id)await client.query('UPDATE tour_groups SET active_session_id=NULL WHERE id=$1 AND active_session_id=$2',[row.tour_group_id,id]);
     if(row && !row.transcript_expired_at && new Date(row.expires_at)>new Date())await client.query('INSERT INTO cleanup_jobs(session_id) VALUES($1) ON CONFLICT DO NOTHING',[id]);
   });
 }
@@ -289,7 +290,7 @@ export async function dbGetSessionOwner(id) {
 export async function dbGetSessionsByUser(userId) {
   if (!dbReady()) return [];
   const result = await pool.query(
-    `SELECT id,name,status,processing_status,created_at,started_at,ended_at,expires_at,transcript_expired_at,transcript_warning
+    `SELECT id,name,status,processing_status,created_at,started_at,ended_at,expires_at,transcript_expired_at,transcript_warning,tour_group_id
      FROM sessions WHERE user_id = $1 ORDER BY created_at DESC`,
     [userId]
   );
@@ -550,4 +551,61 @@ export async function dbReconcileAccounts(){
     -COALESCE((SELECT SUM(l.credits_charged) FROM usage_ledger l WHERE l.user_id=u.id AND l.created_at>=b.captured_at),0) AS expected
     FROM users u JOIN account_opening_balances b ON b.user_id=u.id ORDER BY u.created_at`);
   return rows.map(row=>({...row,expected:Number(row.expected),matches:Number(row.expected)===row.actual}));
+}
+
+// Group membership can later be driven by a paid-tier entitlement. These
+// operations only manage data; the HTTP handlers enforce feature access.
+export async function dbCreateTourGroup({id,userId,name,code}) {
+  requireDatabase();
+  return (await pool.query('INSERT INTO tour_groups(id,user_id,name,code) VALUES($1,$2,$3,$4) RETURNING *',[id,userId,name,code])).rows[0];
+}
+export async function dbGetTourGroupsByUser(userId) {
+  requireDatabase();
+  return (await pool.query(`SELECT g.*,s.status AS active_status FROM tour_groups g
+    LEFT JOIN sessions s ON s.id=g.active_session_id WHERE g.user_id=$1 ORDER BY g.created_at DESC`,[userId])).rows;
+}
+export async function dbGetOpenTourGroups() {
+  requireDatabase();
+  return (await pool.query("SELECT * FROM tour_groups WHERE status='open'")).rows;
+}
+export async function dbGetTourGroup(id,userId) {
+  requireDatabase();
+  return (await pool.query('SELECT * FROM tour_groups WHERE id=$1 AND user_id=$2',[id,userId])).rows[0]||null;
+}
+export async function dbRenameTourGroup(id,userId,name) {
+  requireDatabase();
+  return (await pool.query('UPDATE tour_groups SET name=$3 WHERE id=$1 AND user_id=$2 AND status=$4 RETURNING *',[id,userId,name,'open'])).rows[0]||null;
+}
+export async function dbCreateTourSession({id,userId,groupId,joinCode,name}) {
+  return transaction(async client=>{
+    const {rows:[group]}=await client.query('SELECT * FROM tour_groups WHERE id=$1 AND user_id=$2 FOR UPDATE',[groupId,userId]);
+    if(!group)throw new Error('tour_not_found');
+    if(group.status!=='open')throw new Error('tour_closed');
+    if(group.active_session_id)throw new Error('tour_session_active');
+    const {rows:[room]}=await client.query(`INSERT INTO sessions(id,join_code,name,user_id,tour_group_id,status)
+      VALUES($1,$2,$3,$4,$5,'created') RETURNING *`,[id,joinCode,name,userId,groupId]);
+    await client.query('UPDATE tour_groups SET active_session_id=$2 WHERE id=$1',[groupId,id]);
+    return room;
+  });
+}
+export async function dbCloseTourGroup(id,userId) {
+  return transaction(async client=>{
+    const {rows:[group]}=await client.query('SELECT * FROM tour_groups WHERE id=$1 AND user_id=$2 FOR UPDATE',[id,userId]);
+    if(!group)return null;
+    if(group.active_session_id)throw new Error('tour_session_active');
+    return (await client.query("UPDATE tour_groups SET status='closed',closed_at=now() WHERE id=$1 RETURNING *",[id])).rows[0];
+  });
+}
+export async function dbGetTourGroupsForRouting() {
+  requireDatabase();
+  return (await pool.query('SELECT id,user_id,name,code,status,active_session_id FROM tour_groups')).rows;
+}
+export async function dbRotateTourGroup(id,userId,code) {
+  return transaction(async client=>{
+    const {rows:[group]}=await client.query('SELECT * FROM tour_groups WHERE id=$1 AND user_id=$2 FOR UPDATE',[id,userId]);
+    if(!group)return null;
+    if(group.status!=='open')throw new Error('tour_closed');
+    if(group.active_session_id)throw new Error('tour_session_active');
+    return (await client.query('UPDATE tour_groups SET code=$2 WHERE id=$1 RETURNING *',[id,code])).rows[0];
+  });
 }

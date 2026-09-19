@@ -198,3 +198,19 @@ CREATE TABLE IF NOT EXISTS cleanup_chunks (
   PRIMARY KEY(session_id, source_hash, chunk_index)
 );
 CREATE INDEX IF NOT EXISTS sessions_expiry ON sessions(expires_at) WHERE transcript_expired_at IS NULL;
+
+-- A reusable public entrance for a multi-session tour.
+CREATE TABLE IF NOT EXISTS tour_groups (
+  id UUID PRIMARY KEY,
+  user_id UUID NOT NULL REFERENCES users(id),
+  name TEXT NOT NULL,
+  code TEXT NOT NULL UNIQUE,
+  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','closed')),
+  active_session_id UUID REFERENCES sessions(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  closed_at TIMESTAMPTZ
+);
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS tour_group_id UUID REFERENCES tour_groups(id);
+CREATE INDEX IF NOT EXISTS sessions_tour_group_idx ON sessions(tour_group_id,created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS sessions_one_open_per_tour ON sessions(tour_group_id)
+  WHERE tour_group_id IS NOT NULL AND status IN ('created','live','paused');

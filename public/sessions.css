@@ -74,3 +74,23 @@ body.theme-dark { min-height: 100vh; }
   .list-toolbar { flex-direction: column; align-items: stretch; }
   .list-count { margin-right: 0; }
 }
+
+.tour-section{margin-bottom:var(--space-8);padding:var(--space-4);background:var(--color-surface)}
+.tour-section h2{font-size:24px;margin:0}
+.tour-create{display:flex;align-items:center;gap:var(--space-3);flex-wrap:wrap;margin:var(--space-4) 0}
+.tour-create .input{width:min(280px,100%)}
+.tour-list{display:grid;gap:var(--space-4)}
+.tour-card{border:1px solid var(--color-divider);padding:var(--space-4);display:grid;gap:var(--space-3)}
+.tour-card h3{font-size:19px;margin:0}
+.tour-card p{margin:0}
+.tour-share{display:flex;gap:var(--space-4);align-items:center;flex-wrap:wrap}
+.tour-share img{width:120px;height:120px;background:#fff;padding:5px}
+.tour-share a{overflow-wrap:anywhere}
+.tour-card-actions,.tour-session-form{display:flex;gap:var(--space-2);align-items:center;flex-wrap:wrap}
+.tour-session-form .input{width:min(300px,100%)}
+
+.tour-section .btn-primary{color:#fff}
+.tour-section .btn-primary:hover{color:#fff}
+.tour-share a{color:var(--color-accent-400)}
+
+.summary-cta,.summary-cta .summary-cta-sub{color:#fff}

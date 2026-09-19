@@ -39,6 +39,7 @@ import {
   dbMarkSessionResumed,
   dbRecoverSessions, dbGetRecentTranscript, dbCommitTranscript, dbMarkTranscriptWarning,
   dbGetRawTranscript, dbExpireTranscripts, dbSetHistoryBoundary, dbGetAudioMeter, dbSaveAudioMeter, dbGetBillingHistory,
+  dbCreateTourGroup,dbGetTourGroupsByUser,dbGetTourGroupsForRouting,dbGetTourGroup,dbRenameTourGroup,dbCreateTourSession,dbCloseTourGroup,dbRotateTourGroup,
 } from './db.js';
 import { runTranscriptCleanup, startCleanupWorker } from './transcript-cleanup.js';
 import { sendOrderNotificationEmail, sendOrderCreatedEmail } from './mail.js';
@@ -136,6 +137,14 @@ const LOGIN_ALLOWLIST = parseAllowlist(process.env.LOGIN_ALLOWLIST);
 // is the door, the credit gate is the lock, and the lock has to already be
 // installed before the door opens.
 const OPEN_SIGNUP = process.env.OPEN_SIGNUP === 'true';
+// Temporary early access. Future plans can grant the same feature through
+// a membership entitlement without changing the tour/session data model.
+const TOUR_EARLY_ACCESS_EMAILS = parseAllowlist(process.env.TOUR_EARLY_ACCESS_EMAILS);
+function canCreateFixedTours(user){return Boolean(user?.email && TOUR_EARLY_ACCESS_EMAILS.has(user.email.trim().toLowerCase()));}
+function requireFixedTourAccess(req,res,next){
+  if(!canCreateFixedTours(req.user))return res.status(403).json({error:'fixed_tours_not_enabled'});
+  next();
+}
 if (!OPEN_SIGNUP && LOGIN_ALLOWLIST.size === 0) {
   console.error(
     'LOGIN_ALLOWLIST 未設定或為空 — 目前所有 Google 登入都會被拒絕。' +
@@ -259,6 +268,39 @@ function serveFile(res, filePath) {
 // ---------------------------------------------------------------------------
 export const sessions = new Map();           // id -> session
 const sessionsByJoinCode = new Map(); // joinCode -> id
+const tourGroupsByCode = new Map();
+const tourGroupsById = new Map();
+const invalidViewerCodes = new Map();
+function rejectedViewerCode(req,ws){
+  const key=req.socket.remoteAddress||'unknown',now=Date.now();
+  const old=invalidViewerCodes.get(key);
+  const entry=old&&now-old.since<60_000?old:{since:now,count:0};
+  entry.count++;invalidViewerCodes.set(key,entry);
+  if(entry.count>60){send(ws,{type:'register_error',reason:'too_many_attempts'});ws.close(1008);return;}
+  send(ws,{type:'register_error',reason:'invalid_code'});
+}
+function rememberTourGroup(row){
+  const group={id:row.id,userId:row.user_id,name:row.name,code:row.code,status:row.status,
+    activeSessionId:row.active_session_id,viewers:new Set()};
+  tourGroupsById.set(group.id,group);
+  tourGroupsByCode.set(group.code,group);
+  return group;
+}
+function tourShare(req,group){
+  return {id:group.id,name:group.name,code:group.code,status:group.status,
+    activeSessionId:group.activeSessionId,viewerUrl:getOrigin(req)+'/live?code='+group.code};
+}
+function notifyTourViewers(group,room){
+  for(const ws of group.viewers){
+    if(ws.roomSessionId)sessions.get(ws.roomSessionId)?.viewers.delete(ws);
+    ws.roomSessionId=room?.id||null;
+    if(room)room.viewers.add(ws);
+    send(ws,{type:'viewer_registered',sessionId:room?.id||null});
+    send(ws,{type:'session_status',status:room?.status||'waiting',name:room?.name||group.name,targetLangs:room?.targetLangs||null});
+    if(room && ['live','paused'].includes(room.status))send(ws,{type:'backfill',utterances:room.history.slice(-BACKFILL_COUNT)});
+  }
+  if(room)sendViewerCount(room);
+}
 
 const JOIN_CODE_ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789'; // no 0/o/1/i/l — avoids read-aloud ambiguity
 const JOIN_CODE_LENGTH = 6;
@@ -315,6 +357,7 @@ function createSession(userId, row = null) {
     id,
     joinCode,
     name: row?.name || null,
+    tourGroupId:row?.tour_group_id||null,
     status: row?.status || 'created',
     transcriptWarning: Boolean(row?.transcript_warning),
     displayAfterSeq: Number(row?.display_after_seq || 0),
@@ -385,6 +428,8 @@ async function sweepStaleSessions() {
     if (stale) {
       sessions.delete(id);
       sessionsByJoinCode.delete(session.joinCode);
+      if(session.tourGroupId){const group=tourGroupsById.get(session.tourGroupId);
+        if(group?.activeSessionId===id){group.activeSessionId=null;notifyTourViewers(group,null);}}
       continue;
     }
     const abandonedWhileOpen =
@@ -464,6 +509,99 @@ app.post('/api/temporary-key', requireLoginApi, (req, res) => {
 // join_code, in status `created`, owned by the logged-in user (SPEC §3a
 // point 3 — this replaces the old shared host-secret gate for this one
 // endpoint; see requireLoginApi above).
+// Fixed tour entrances: owner-gated management, guest-readable link only.
+app.get('/api/tours',requireLoginApi,async(req,res)=>{
+  try{
+    const rows=await dbGetTourGroupsByUser(req.user.id);
+    res.json(rows.map(row=>({...tourShare(req,{id:row.id,name:row.name,code:row.code,status:row.status,activeSessionId:row.active_session_id}),activeStatus:row.active_status,createdAt:row.created_at})));
+  }catch(error){console.error('[tour] list:',error.message);res.status(503).json({error:'固定入口暫時無法讀取'});}
+});
+app.post('/api/tours',requireLoginApi,requireFixedTourAccess,async(req,res)=>{
+  const name=typeof req.body?.name==='string'?req.body.name.trim():'';
+  if(!name||name.length>80)return res.status(400).json({error:'請填寫 1–80 字的團名'});
+  try{
+    let row;
+    for(let attempt=0;attempt<5;attempt++){
+      const code=Array.from(crypto.randomBytes(8),byte=>JOIN_CODE_ALPHABET[byte%JOIN_CODE_ALPHABET.length]).join('');
+      try{row=await dbCreateTourGroup({id:crypto.randomUUID(),userId:req.user.id,name,code});break;}
+      catch(error){if(error.code!=='23505')throw error;}
+    }
+    if(!row)throw new Error('code_generation_failed');
+    const group=rememberTourGroup(row),shared=tourShare(req,group);
+    res.status(201).json({...shared,qrDataUrl:await QRCode.toDataURL(shared.viewerUrl,{margin:1,width:320})});
+  }catch(error){console.error('[tour] create:',error.message);res.status(503).json({error:'建立固定入口失敗，請稍後重試'});}
+});
+app.get('/api/tours/:id/qr',requireLoginApi,async(req,res)=>{
+  try{const row=await dbGetTourGroup(req.params.id,req.user.id);
+    if(!row)return res.status(404).end();
+    const url=getOrigin(req)+'/live?code='+row.code;
+    res.set('Cache-Control','no-store').type('png').send(await QRCode.toBuffer(url,{margin:1,width:320}));
+  }catch(error){console.error('[tour] qr:',error.message);res.status(503).end();}
+});
+app.patch('/api/tours/:id/name',requireLoginApi,async(req,res)=>{
+  const name=typeof req.body?.name==='string'?req.body.name.trim():'';
+  if(!name||name.length>80)return res.status(400).json({error:'請填寫 1–80 字的團名'});
+  try{const row=await dbRenameTourGroup(req.params.id,req.user.id,name);
+    if(!row)return res.status(404).json({error:'固定入口不存在或已關閉'});
+    const group=tourGroupsById.get(row.id);if(group)group.name=name;
+    res.json({id:row.id,name});
+  }catch(error){console.error('[tour] rename:',error.message);res.status(503).json({error:'更名失敗'});}
+});
+app.post('/api/tours/:id/sessions',requireLoginApi,requireFixedTourAccess,async(req,res)=>{
+  const name=typeof req.body?.name==='string'?req.body.name.trim():'';
+  if(!name||name.length>80)return res.status(400).json({error:'請填寫 1–80 字的場次名稱'});
+  try{
+    let row;
+    for(let attempt=0;attempt<5;attempt++){
+      const id=crypto.randomUUID(),joinCode=createUniqueJoinCode();
+      try{row=await dbCreateTourSession({id,userId:req.user.id,groupId:req.params.id,joinCode,name});break;}
+      catch(error){if(error.code!=='23505')throw error;}
+    }
+    if(!row)throw new Error('code_generation_failed');
+    const group=tourGroupsById.get(req.params.id);
+    if(!group)throw new Error('tour_runtime_missing');
+    const room=createSession(req.user.id,row);
+    group.activeSessionId=room.id;
+    notifyTourViewers(group,room);
+    res.status(201).json({id:room.id,groupId:group.id,name:room.name,hostUrl:'/host?id='+room.id,viewerUrl:getOrigin(req)+'/live?code='+group.code});
+  }catch(error){
+    if(error.message==='tour_session_active')return res.status(409).json({error:'請先結束目前場次'});
+    if(error.message==='tour_not_found'||error.message==='tour_closed')return res.status(404).json({error:'固定入口不存在或已關閉'});
+    console.error('[tour] new session:',error.message);res.status(503).json({error:'建立團體場次失敗，請稍後重試'});
+  }
+});
+app.post('/api/tours/:id/rotate',requireLoginApi,async(req,res)=>{
+  try{
+    let row;
+    for(let attempt=0;attempt<5;attempt++){
+      const code=Array.from(crypto.randomBytes(8),byte=>JOIN_CODE_ALPHABET[byte%JOIN_CODE_ALPHABET.length]).join('');
+      try{row=await dbRotateTourGroup(req.params.id,req.user.id,code);break;}
+      catch(error){if(error.code!=='23505')throw error;}
+    }
+    if(!row)return res.status(404).json({error:'固定入口不存在'});
+    const group=tourGroupsById.get(row.id);
+    if(group){tourGroupsByCode.delete(group.code);group.code=row.code;tourGroupsByCode.set(group.code,group);
+      for(const viewer of group.viewers){send(viewer,{type:'session_status',status:'closed',name:group.name});viewer.close(1008);}
+      group.viewers.clear();}
+    const shared=tourShare(req,group||{id:row.id,name:row.name,code:row.code,status:row.status,activeSessionId:row.active_session_id});
+    res.json(shared);
+  }catch(error){
+    if(error.message==='tour_session_active')return res.status(409).json({error:'請先結束目前場次'});
+    if(error.message==='tour_closed')return res.status(409).json({error:'固定入口已關閉'});
+    console.error('[tour] rotate:',error.message);res.status(503).json({error:'更換固定碼失敗'});
+  }
+});
+app.post('/api/tours/:id/close',requireLoginApi,async(req,res)=>{
+  try{const row=await dbCloseTourGroup(req.params.id,req.user.id);
+    if(!row)return res.status(404).json({error:'固定入口不存在'});
+    const group=tourGroupsById.get(row.id);
+    if(group){group.status='closed';group.activeSessionId=null;
+      for(const ws of group.viewers)send(ws,{type:'session_status',status:'closed',name:group.name});}
+    res.json({id:row.id,status:'closed'});
+  }catch(error){if(error.message==='tour_session_active')return res.status(409).json({error:'請先結束目前場次'});
+    console.error('[tour] close:',error.message);res.status(503).json({error:'關閉固定入口失敗'});}
+});
+
 app.post('/api/sessions', requireLoginApi, async (req, res) => {
   const session = createSession(req.user.id);
   // DB is the source of truth for session metadata (SPEC §6.5); this is an
@@ -502,6 +640,7 @@ app.get('/api/sessions', requireLoginApi, async (req, res) => {
       createdAt: row.created_at,
       startedAt: row.started_at,
       endedAt: row.ended_at,
+      tourGroupId:row.tour_group_id,
       expiresAt: row.expires_at, transcriptExpired: Boolean(row.transcript_expired_at || (row.expires_at && new Date(row.expires_at)<=new Date())), transcriptWarning: row.transcript_warning,
     })));
   } catch (err) {
@@ -530,14 +669,16 @@ app.get('/api/sessions/:id', requireLoginApi, async (req, res) => {
     res.status(404).json({ error: 'session_not_found' });
     return;
   }
-  const viewerUrl = `${getOrigin(req)}/live?code=${row.join_code}`;
+  const sharedCode=row.tour_group_id?(await dbGetTourGroup(row.tour_group_id,req.user.id))?.code:row.join_code;
+  if(!sharedCode)return res.status(503).json({error:'固定入口暫時無法讀取'});
+  const viewerUrl = getOrigin(req)+'/live?code='+sharedCode;
   let qrDataUrl = null;
   try {
     qrDataUrl = await QRCode.toDataURL(viewerUrl, { margin: 1, width: 320 });
   } catch (err) {
     console.error('QR code generation failed:', err);
   }
-  res.status(200).json({ id: row.id, joinCode: row.join_code, name: row.name, status: row.status, viewerUrl, qrDataUrl });
+  res.status(200).json({ id: row.id, joinCode: sharedCode, tourGroupId:row.tour_group_id, name: row.name, status: row.status, viewerUrl, qrDataUrl });
 });
 
 // Deletes a session entirely (SPEC: "刪除場次" — the counterpart to the
@@ -565,6 +706,8 @@ app.delete('/api/sessions/:id', requireLoginApi, async (req, res) => {
     res.status(404).json({ error: 'session_not_found' });
     return;
   }
+  if(liveSession?.tourGroupId){const group=tourGroupsById.get(liveSession.tourGroupId);
+    if(group?.activeSessionId===id){group.activeSessionId=null;notifyTourViewers(group,null);}}
   if (liveSession) {
     sessions.delete(id);
     sessionsByJoinCode.delete(liveSession.joinCode);
@@ -591,6 +734,8 @@ app.post('/api/sessions/:id/end', requireLoginApi, async (req, res) => {
       await endSession(liveSession); // updates memory + DB + broadcasts + cleanup
     } else {
       await dbMarkSessionEnded(id);
+      const groupId=(await dbGetSessionById(id))?.tour_group_id;
+      if(groupId){const group=tourGroupsById.get(groupId);if(group?.activeSessionId===id){group.activeSessionId=null;notifyTourViewers(group,null);}}
       await runTranscriptCleanup(id);
     }
   } catch (err) {
@@ -616,7 +761,7 @@ app.get('/api/me', (req, res) => {
     res.status(200).json({ guest: true });
     return;
   }
-  res.status(200).json({ id: req.user.id, email: req.user.email, name: req.user.name });
+  res.status(200).json({ id: req.user.id, email: req.user.email, name: req.user.name, features:{fixedTours:canCreateFixedTours(req.user)} });
 });
 
 // --- Credits / top-up (SPEC steps 3/6) --------------------------------------
@@ -1007,6 +1152,8 @@ async function endSession(session) {
   await dbMarkSessionEnded(session.id);
   session.status = 'ended';
   session.endedAt = Date.now();
+  if(session.tourGroupId){const group=tourGroupsById.get(session.tourGroupId);
+    if(group?.activeSessionId===session.id){group.activeSessionId=null;notifyTourViewers(group,null);}}
   console.log(`[session ${session.id}] ended`);
   broadcastToViewers(session, { type: 'session_status', status: 'ended', name: session.name });
   session.viewers.clear();
@@ -1137,7 +1284,8 @@ const HEARTBEAT_INTERVAL = 15000;
 wss.on('connection', (ws, req) => {
   ws.on('error', () => ws.terminate());
   let role = null;
-  let sessionId = null; // resolved at register time from sessionId (host) or joinCode (viewer)
+  let sessionId = null; // host room or viewer room at initial registration
+  let tourGroupId = null;
   ws.isAlive = true;
   ws.on('pong', () => { ws.isAlive = true; });
 
@@ -1183,17 +1331,35 @@ wss.on('connection', (ws, req) => {
         sendViewerCount(session);
         send(ws, { type: 'host_registered', transcriptWarning:session.transcriptWarning });
       } else if (msg.role === 'viewer') {
-        const targetId = typeof msg.joinCode === 'string' ? sessionsByJoinCode.get(msg.joinCode) : null;
+        const requestedCode=typeof msg.joinCode==='string'?msg.joinCode.trim().toLowerCase():'';
+        const group=tourGroupsByCode.get(requestedCode);
+        if(group){
+          role='viewer';tourGroupId=group.id;group.viewers.add(ws);
+          if(group.status==='closed'){
+            send(ws,{type:'viewer_registered',sessionId:null});
+            send(ws,{type:'session_status',status:'closed',name:group.name});return;
+          }
+          const active=group.activeSessionId?sessions.get(group.activeSessionId):null;
+          ws.roomSessionId=active?.id||null;
+          if(active){active.viewers.add(ws);sendViewerCount(active);}
+          send(ws,{type:'viewer_registered',sessionId:active?.id||null});
+          send(ws,{type:'session_status',status:active?.status||'waiting',targetLangs:active?.targetLangs||null,name:active?.name||group.name});
+          if(active && ['live','paused'].includes(active.status))send(ws,{type:'backfill',utterances:active.history.slice(-BACKFILL_COUNT)});
+          return;
+        }
+        const targetId = sessionsByJoinCode.get(requestedCode);
         const session = targetId ? sessions.get(targetId) : null;
         if (!session) {
-          send(ws, { type: 'register_error', reason: 'invalid_code' });
+          rejectedViewerCode(req,ws);
           return;
         }
         role = 'viewer';
         sessionId = session.id;
+        ws.roomSessionId=session.id;
         session.viewers.add(ws);
         console.log(`[viewer+] session=${session.id} total=${session.viewers.size}`);
         sendViewerCount(session);
+        send(ws,{type:'viewer_registered',sessionId:session.id});
         send(ws, { type: 'session_status', status: session.status, targetLangs: session.targetLangs, name: session.name });
         if (session.status === 'live' || session.status === 'paused') {
           send(ws, { type: 'backfill', utterances: session.history.slice(-BACKFILL_COUNT) });
@@ -1205,7 +1371,8 @@ wss.on('connection', (ws, req) => {
     // Every non-register message operates on the session resolved above —
     // if the connection never registered (or its session got swept), there's
     // nothing to act on.
-    const session = sessionId ? sessions.get(sessionId) : null;
+    const resolvedId=role==='viewer'?ws.roomSessionId:sessionId;
+    const session=resolvedId?sessions.get(resolvedId):null;
     if (!session) return;
     if (role === 'host' && session.hostWs !== ws) return;
 
@@ -1275,6 +1442,7 @@ wss.on('connection', (ws, req) => {
     // while this viewer was disconnected, so current ids are all <= its
     // stale `after`), there's no valid delta to compute — send a full reset.
     if (role === 'viewer' && msg.type === 'resync') {
+      if(msg.sessionId && msg.sessionId!==session.id)return send(ws,{type:'resync',reset:true,utterances:session.history.slice()});
       const after = Number.isFinite(msg.after) ? msg.after : 0;
       const maxId = session.history.length ? session.history[session.history.length - 1].id : 0;
       if (maxId < after || after < session.displayAfterSeq) {
@@ -1296,7 +1464,9 @@ wss.on('connection', (ws, req) => {
   }
 
   ws.on('close', () => {
-    const session = sessionId ? sessions.get(sessionId) : null;
+    if(tourGroupId)tourGroupsById.get(tourGroupId)?.viewers.delete(ws);
+    const resolvedId=role==='viewer'?ws.roomSessionId:sessionId;
+    const session=resolvedId?sessions.get(resolvedId):null;
     if (!session) return;
     if (role === 'host') {
       if (session.hostWs !== ws) return;
@@ -1332,6 +1502,7 @@ wss.on('connection', (ws, req) => {
 });
 
 const heartbeatTimer = setInterval(() => {
+  for(const [key,value] of invalidViewerCodes)if(Date.now()-value.since>60_000)invalidViewerCodes.delete(key);
   for (const ws of wss.clients) {
     if (ws.isAlive === false) {
       ws.terminate(); // 'close' handler does the role-specific cleanup
@@ -1365,6 +1536,7 @@ export async function restoreRuntime(){
   }
 }
 await restoreRuntime();
+for(const row of (await dbGetTourGroupsForRouting())||[])rememberTourGroup(row);
 async function maintainRetention(){
   for(const id of (await dbExpireTranscripts())||[]){
     const room=sessions.get(id);
